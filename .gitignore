@@ -1,0 +1,7 @@
+automation/__pycache__/
+.agents/*
+.claude/
+*.code-workspace
+.obsidian/*
+.DS_Store
+AUDIT-REPORT.md
