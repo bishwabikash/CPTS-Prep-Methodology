@@ -72,7 +72,10 @@ systeminfo /FO CSV 2>$null | Out-File -FilePath "$OutDir\systeminfo_csv.txt" -En
 $priv = whoami /priv 2>$null | Out-String
 $dangerousPrivs = @('SeImpersonatePrivilege','SeAssignPrimaryTokenPrivilege','SeBackupPrivilege',
                     'SeRestorePrivilege','SeDebugPrivilege','SeTakeOwnershipPrivilege',
-                    'SeLoadDriverPrivilege','SeManageVolumePrivilege','SeMachineAccountPrivilege')
+                    'SeLoadDriverPrivilege','SeManageVolumePrivilege')
+# SeMachineAccountPrivilege intentionally excluded — granted by default to all Authenticated Users
+# (Add Workstations to Domain). Becomes interesting at the AD layer (RBCD/BadSuccessor) but is
+# not a local privesc primitive, so flagging it here produces false positives on every domain user.
 foreach ($p in $dangerousPrivs) {
     if ($priv -match "$p\s+.*Enabled") {
         Hit "$p is ENABLED — see windows-methodology.md §4.2 (token-privilege abuse)"
@@ -406,8 +409,8 @@ $defPref   = Get-MpPreference -ErrorAction SilentlyContinue
 $avBlocks = @(
     @{ Title='Defender status'; Body=($defStatus | Format-List | Out-String) }
     @{ Title='Defender exclusions'; Body=("Paths:`n{0}`n`nProcesses:`n{1}`n`nExtensions:`n{2}" -f ($defPref.ExclusionPath -join "`n"), ($defPref.ExclusionProcess -join "`n"), ($defPref.ExclusionExtension -join "`n")) }
-    @{ Title='installed AV products'; Body=(Get-CimInstance -Namespace root\SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction SilentlyContinue | Format-List | Out-String) }
-    @{ Title='EDR processes (heuristic name match)'; Body=((Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'msmpeng|sense|carbonblack|cb|cylance|crowdstrike|csagent|elastic|sentinel|cortex|trend|mcafee|sophos|defender|tanium' }) | Format-Table -AutoSize | Out-String) }
+    @{ Title='installed AV products (root\SecurityCenter2 — workstation SKUs only; empty on Server)'; Body=(Get-CimInstance -Namespace root\SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction SilentlyContinue | Format-List | Out-String) }
+    @{ Title='EDR processes (heuristic name match — anchored to avoid false positives like cb in cbcontrolpanel.exe)'; Body=((Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(msmpeng|sense|sensecndr|sensedebug|carbonblack|cb|cbdaemon|cbsensor|cylance|cylancesvc|crowdstrike|cscomms|csagent|csfalcon|elastic|elastic-agent|sentinel|sentinelone|cortex|cyveraservice|trend|tmccsf|mcafee|masvc|sophos|sophosfs|swi_service|defender|msdefender|tanium|taniumclient)$' }) | Format-Table -AutoSize | Out-String) }
 )
 Write-Section -Path "$OutDir\av.txt" -Blocks $avBlocks
 

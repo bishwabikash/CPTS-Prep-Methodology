@@ -9,7 +9,7 @@ Every screenshot you skip during the exam is a finding you can't prove in the re
 1. Every screenshot must show the command AND its output
 2. Include the terminal prompt (shows username@hostname = proves which machine)
 3. For web attacks, capture both the Burp request/response AND the browser result
-4. Timestamp your screenshots (CherryTree does this automatically with `Ctrl+T`)
+4. Timestamp your screenshots (CherryTree's "Insert Timestamp" is `Ctrl+Alt+M` by default)
 5. When in doubt, screenshot it — you can always discard later, but you can't go back
 
 ```bash

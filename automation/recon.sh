@@ -84,8 +84,12 @@ to 15 find /etc/systemd -name "*.service" -writable 2>/dev/null | head -1 | grep
 
 # ---------- 4. credentials / config ----------
 {
-  section "shell history files"
-  for f in ~/.bash_history ~/.zsh_history ~/.history /root/.bash_history; do
+  section "shell history files (current user, root, and all readable /home users)"
+  # Cover bash, zsh, fish, ksh — and walk every /home/* user, not just $HOME and root.
+  for f in ~/.bash_history ~/.zsh_history ~/.history ~/.local/share/fish/fish_history ~/.ksh_history \
+           /root/.bash_history /root/.zsh_history /root/.local/share/fish/fish_history /root/.ksh_history \
+           /home/*/.bash_history /home/*/.zsh_history /home/*/.local/share/fish/fish_history \
+           /home/*/.ksh_history /home/*/.history; do
     [ -r "$f" ] && { echo "--- $f ---"; cat "$f"; }
   done
   section "config files mentioning password/secret/key (top 50)"

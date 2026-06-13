@@ -264,8 +264,9 @@ adb shell am start -W -a android.intent.action.VIEW -d "myapp://login?redirect=h
 
 ### 3.1 Acquire Decrypted Binary
 ```bash
-# Jailbroken iOS device required for decrypt. From attacker mac:
-brew install frida-tools
+# Jailbroken iOS device required for decrypt. From attacker host:
+# macOS:  brew install frida-tools     |     Linux/Kali:  pipx install frida-tools (or pip3 install frida-tools)
+brew install frida-tools     # macOS
 pip3 install frida-ios-dump
 
 # SSH-forward to device, then:
@@ -683,7 +684,8 @@ java \
 # Apps using crypto-as-a-service or DRM often ship native .so/.dll/.dylib alongside the jar
 find <APP_PATH>_unpacked/ -name '*.so' -o -name '*.dll' -o -name '*.dylib'
 strings <APP_PATH>_unpacked/native/libfoo.so | grep -iE 'http|key|secret|JNI_OnLoad'
-ghidra-server-headless --import <APP_PATH>_unpacked/native/libfoo.so          # static analysis
+# Headless static analysis — Ghidra's analyzeHeadless (in $GHIDRA_HOME/support/)
+$GHIDRA_HOME/support/analyzeHeadless /tmp/ghidra_proj proj_name -import <APP_PATH>_unpacked/native/libfoo.so
 ```
 
 [↑ Back to top](#mobile--thick-client-penetration-testing-methodology)

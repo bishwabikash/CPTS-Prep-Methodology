@@ -597,11 +597,24 @@ _HOSTNAME_RE = re.compile(
     r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?){1,})(?![A-Za-z0-9.-])",
     re.IGNORECASE,
 )
-_HOSTNAME_TLD_OK = {"htb", "local", "lab", "test", "internal", "corp", "intranet",
-                    "dev", "stage", "prod", "com", "net", "org", "io"}
+_HOSTNAME_TLD_OK = {
+    # CPTS lab / internal
+    "htb", "local", "lab", "test", "internal", "corp", "intranet", "dev", "stage", "prod",
+    # generic gTLDs
+    "com", "net", "org", "io", "co", "info", "biz", "app", "site", "tech",
+    # common ccTLDs (real engagements)
+    "uk", "de", "fr", "nl", "it", "es", "pl", "se", "no", "fi", "dk", "ch", "at",
+    "be", "ie", "au", "nz", "ca", "us", "br", "mx", "ar", "jp", "kr", "cn", "hk",
+    "sg", "in", "ru", "za", "ae", "il", "tr",
+    # gov/edu
+    "gov", "edu", "mil",
+}
+# Tighten reject prefixes: anchored hosts that should never be picked, plus substrings that
+# strongly indicate a public CDN. `localhost` only rejected when it's the full leftmost label
+# so we don't accidentally drop legit hosts like `localhost-test.htb`.
 _HOSTNAME_REJECT_PREFIX = ("w3.org", "schemas.", "github.io", "cdn.", "fonts.",
                            "googleapis.", "jquery.", "bootstrap", "cloudflare.",
-                           "example.", "localhost", "127.0.0.1")
+                           "example.", "localhost.", "127.0.0.1")
 
 def _candidate_hostnames(text: str) -> list[str]:
     out: list[str] = []

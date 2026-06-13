@@ -45,9 +45,7 @@ A comprehensive, exam-ready methodology suite for HackTheBox CPTS certification 
   - ["I'm pivoting from a foothold — now what?"](#im-pivoting-from-a-foothold-now-what)
   - ["How do I know when to stop enumerating?"](#how-do-i-know-when-to-stop-enumerating)
   - ["My tool just errored — what's the backup?"](#my-tool-just-errored-whats-the-backup)
-- [Qualys TRU Arsenal — Linux CVE Quick Reference](#qualys-tru-arsenal-linux-cve-quick-reference)
-- [Reporting Workflow — SysReptor](#reporting-workflow-sysreptor-htb-official)
-- [Cross-File Canonical References](#cross-file-canonical-references)
+- [Reporting](#reporting)
 - [Exam Tips](#exam-tips)
 - [Essential External References](#essential-external-references)
 
@@ -59,10 +57,10 @@ A comprehensive, exam-ready methodology suite for HackTheBox CPTS certification 
 
 ```bash
 # 1. Tooling sanity — pin known-working versions
-nxc --version                              # NetExec ≥ 1.5.1 (CVE in spider_plus < 1.5.1)
+nxc --version                              # NetExec ≥ 1.5.1 (CVE-2026-27884: spider_plus path traversal pre-1.5.1)
 certipy --version                          # Certipy v5.x (Python 3.12+)
 bloodhound-ce-python --version             # NOT bloodhound-python — CE schema differs
-impacket-secretsdump 2>&1 | head -1        # Fortra impacket ≥ 0.13.0
+impacket-secretsdump 2>&1 | head -2 | tail -1   # Fortra impacket ≥ 0.13.0 (banner is on line 2 in some versions)
 which kerbrute coercer evil-winrm hashcat john ffuf feroxbuster nuclei sliver chisel ligolo-proxy
 reptor --version                           # SysReptor CLI for finding/PDF automation
 # If any missing → install BEFORE the clock starts. Exam-day installs eat hours.
@@ -300,7 +298,13 @@ Quick index for the most-asked CPTS web injection paths. Phase numbers refer to 
 1. Test against ALL services: `nxc smb/winrm/rdp/mssql/ssh <SUBNET>/24 -u '<USER>' -p '<PASS>'` (look for `(Pwn3d!)`)
 2. Check shares: `nxc smb <SUBNET>/24 -u '<USER>' -p '<PASS>' --shares`
 3. Password policy first: `nxc smb <DC_IP> -u '<USER>' -p '<PASS>' --pass-pol` (before any further spray)
-4. Full checklist: [enumeration-methodology.md](enumeration-methodology.md) Phase 4.1-4.3
+4. Test against ALL services — run each protocol in turn (`smb`, `winrm`, `rdp`, `mssql`, `ssh`):
+   ```bash
+   for proto in smb winrm rdp mssql ssh; do
+     nxc $proto <SUBNET>/24 -u '<USER>' -p '<PASS>'
+   done
+   ```
+5. Full checklist: [enumeration-methodology.md](enumeration-methodology.md) Phase 4.1-4.3
 
 **Cred-type → action matrix** (run in order; stop when one works). Source matters — **GPP cpassword and unattend.xml passwords are auto-decryptable**, kerberoasted hashes need cracking first.
 
@@ -461,188 +465,13 @@ When the primary tool errors out, don't lose 30 minutes debugging — switch too
 
 ---
 
-## 🛡️ Qualys TRU Arsenal — Linux CVE Quick Reference
+## Reporting
 
-Vulnerabilities discovered by the Qualys Threat Research Unit. Check these on every Linux target. **All entries below were primary-source verified against NVD/Qualys/distro trackers on 2026-05-17.**
-
-| CVE | Name | Affected | Check Command | Impact |
-|---|---|---|---|---|
-| CVE-2021-4034 | **PwnKit** | polkit pkexec (since 2009) | `ls -la /usr/bin/pkexec` | Instant root (SUID) |
-| CVE-2021-3156 | **Baron Samedit** | sudo 1.8.2–1.9.5p1 | `sudo --version` | Root without password |
-| CVE-2024-6387 | **regreSSHion** | OpenSSH 8.5p1–9.7p1 | `ssh -V` / `nc <IP> 22` | Remote RCE (complex; 32-bit much easier) |
-| CVE-2024-48990 | **Needrestart** | needrestart < 3.8 (Ubuntu Server default) | `dpkg -l needrestart` | Root via PYTHONPATH |
-| CVE-2025-6018 | **pam-config** (chains with 6019) | SUSE pam-config 1.1.8-24.71.1 | `cat /etc/pam.d/common-session*` | `allow_active` escalation |
-| CVE-2025-6019 | **udisks/libblockdev** (chains with 6018) | RHEL, Debian, SUSE, Ubuntu (most) | `dpkg -l udisks2 libblockdev*` | Root via crafted XFS image SUID bypass |
-| CVE-2026-23268 | **CrackArmor** | Linux kernel AppArmor (multi-branch) | `aa-status` | Confused-deputy → root + namespace bypass |
-| CVE-2026-3888 | **snap LPE** | Ubuntu 16.04 / 18.04 / 20.04 / 22.04 / 24.04 LTS | `snap version` | Race against systemd-tmpfiles cleanup of snap private /tmp |
-| CVE-2026-46300 | **Fragnesia** | Linux kernel ESP module (Debian 5.10.x–7.0.7-1, Ubuntu all) | `lsmod \| grep esp` | LPE; pairs with Dirty Flag (NVD pending) |
-| CVE-2026-43284 | **Dirty Frag** | Linux 4.11–7.0.5 (xfrm/ESP only) | `lsmod \| grep esp` | Write-what-where via in-place ESP decryption + MSG_SPLICE_PAGES |
-| CVE-2026-31431 | **Copy Fail** | Linux 4.14–7.0-rc6 — broad vendor footprint | `cat /proc/crypto \| grep aead` | algif_aead in-place AEAD revert; CISA KEV |
-
-> Full exploitation details in [linux-methodology.md](linux-methodology.md) → Section 4.7
-> **Verification note:** all 7 of the 2025–2026 CVEs above were confirmed against NVD/Qualys/Ubuntu/Debian/SUSE primary sources on 2026-05-17. The "PAM+udisks" chain is two CVEs (6018 + 6019), not one; CVE-2026-3888 is a /tmp re-creation race (NOT a timing attack as some secondary sources describe).
-
-[↑ Back to top](#cpts-penetration-testing-methodology)
-
----
-
-## 📸 Reporting Workflow — SysReptor (HTB Official)
-
-> **Pick ONE on Day 0, do not mix mid-engagement:**
-> - **SysReptor** (cloud or self-hosted, **recommended**) — auto-renders PDF, has the official HTB CPTS template, supports inline asset uploads, exam-grade workflow. Documented below.
-> - **CherryTree** (legacy, file-based, manual PDF export) — fallback only if SysReptor is unavailable. Documented in [reporting/cherrytree-structure.md](reporting/cherrytree-structure.md).
+> Full reporting workflow lives in [reporting/README.md](reporting/README.md). Two flows are documented:
+> - **SysReptor + reptor CLI** (recommended) — Day 0 setup, capture cadence, finding schema, daily cadence, report-day flow, screenshot rules.
+> - **CherryTree** (fallback) — node tree, tips, transfer to SysReptor.
 >
-> The two flows assume different note-taking systems for Days 1-7. Choose on Day 0 and stick with it through Day 10. Do not start in CherryTree and migrate to SysReptor mid-engagement (or vice versa).
-
-Primary tool: **SysReptor** with the official **HTB CPTS design** (https://docs.sysreptor.com/demo-reports/). Cloud or self-hosted both work for the exam. CherryTree files in [reporting/](reporting/) remain useful for live note-taking *during* the engagement, but the final deliverable is a SysReptor PDF.
-
-### Day 0 — SysReptor setup
-
-```bash
-# 1. Get an account at sysreptor.com (cloud) OR self-host:
-git clone https://github.com/Syslifters/sysreptor.git
-cd sysreptor/deploy && bash install.sh        # docker-compose stack on :8000
-
-# 2. Download the HTB CPTS design + import:
-curl -LO https://docs.sysreptor.com/assets/reports/htb-designs.tar.gz
-tar xf htb-designs.tar.gz
-# Import via UI: Designs → Import → htb-designs.tar.gz
-# OR via CLI (see below — install reptor first)
-
-# 3. Install the reptor CLI (Python pip):
-pip install reptor
-reptor conf                                    # interactive auth setup (URL + API token)
-# Token: in SysReptor UI → User → API Tokens → Create
-```
-
-### Create the exam project
-
-```bash
-# Create project from HTB CPTS design
-reptor createproject --name "CPTS Exam YYYYMMDD" --design "HTB CPTS"
-# Output includes the project URL — bookmark it; this is where ALL findings go.
-
-# Verify
-reptor project --list
-```
-
-### Capture cadence — what to log to SysReptor at each phase boundary
-
-> Don't write findings narrative until Day 8. DO log raw evidence (screenshots, output snippets, host states) into the project's **Notes** continuously — the Notes tree later gets reorganized into formal findings.
-
-| Trigger | What to capture | How (SysReptor) |
-|---|---|---|
-| Got a foothold | shell screenshot + `whoami/id` + host IP + initial vector | Notes → host page → paste image (drag-drop) + command block |
-| Found a credential | source path + decrypted/cracked value + reuse test result | Notes → "Credentials" tree node → row per cred |
-| Privesc succeeded | before-after `whoami /priv` or `id` + exact exploit command | Notes → host page → "Privilege Escalation" subnode + screenshot |
-| Lateral move | src host + tgt host + cred used + target shell screenshot | Notes → "Lateral Moves" tree → table row + image |
-| BloodHound path | path graph PNG + Cypher query + edges traversed | Notes → "AD Paths" → image + code block |
-| Domain compromise | DCSync output (truncated to a few hashes) + DA shell screenshot | Notes → "Domain Compromise" node — top-level highlight |
-| Coerce/relay | responder/ntlmrelayx output showing the relay + cert/hash obtained | Notes → "Coerce-Relay" → command + output paste |
-| AD CS abuse | `certipy find` snippet showing ESCx + the `req`/`auth` chain | Notes → "ADCS" → image + chain steps |
-
-### `reptor` CLI — exam-day workflow
-
-```bash
-# Import nmap output as findings (auto-creates open-port findings)
-reptor nmap -i nmap.xml --push-findings
-
-# Pull a finding template by tag, fill placeholders, push to project
-reptor findingfromtemplate --tags ad,kerberoast
-reptor findingfromtemplate --tags adcs,esc1
-
-# Push image → SysReptor (returns markdown link to embed in finding)
-reptor file --upload screenshots/foothold.png
-# → ![Image](/assets/<UUID>/foothold.png)  (paste into description)
-
-# Export findings as TOML/JSON for backup
-reptor exportfindings -o cpts-backup.json
-
-# Generate the PDF
-reptor render --project-id <UUID>             # or render via UI: Project → Render → PDF
-```
-
-### HTB CPTS finding fields (standard SysReptor schema)
-
-When writing findings on Days 8-10, fill these fields per the HTB CPTS design:
-
-| Field | Type | What goes here |
-|---|---|---|
-| `title` | string | Short identifier — "Domain Compromise via ESC8 NTLM Relay" |
-| `cvss` | CVSS 3.1 vector | Use https://cvss.js.org for vector building; severity auto-derived |
-| `cwe` | CWE selector | Pick the closest match — examiners check this |
-| `affected_components` | list | Hosts/URLs/services impacted |
-| `summary` (short_description) | string | One-line for executive summary |
-| `description` | markdown | Technical explanation; **paste tool output here** |
-| `impact` | markdown | Business consequence — "DA = full domain control = data exfil + ransomware" |
-| `recommendation` | markdown | Specific patch, config change, or compensating control |
-| `references` | list of URLs | NVD, vendor advisory, MITRE ATT&CK technique |
-| `evidence` | list of images | Drag-drop screenshots; auto-uploaded to project |
-
-### Daily cadence (10-day exam)
-
-```text
-End of every exam day:
-  1. Open SysReptor project → Notes → ensure today's findings are captured
-  2. reptor exportfindings -o backup-day-N.json   # off-host backup
-  3. Update Notes "TOMORROW" node with first target for Day N+1
-  4. Snapshot: zip the loot_<HOST>_<TIMESTAMP>/ dirs from recon scripts to a backup
-```
-
-### Report-day flow (Days 8-10)
-
-```text
-1. Open SysReptor project → "Findings" tab
-2. For each Note tree node that's a real finding:
-   a. Click "+ Finding" → pick template (by tag) or blank
-   b. Fill the 10 schema fields above
-   c. Drag-drop screenshots from disk into the description (auto-uploads)
-   d. Set CVSS via the inline editor → severity auto-fills
-3. Order: Critical → High → Medium → Low → Informational
-4. Methodology section (HTB CPTS design has one): walk phase-by-phase
-5. Executive Summary: 3-5 paragraphs — do this LAST after all findings written
-6. Render → PDF → review for image breaks, broken links, copy-paste artifacts
-7. Re-render after fixes. PDF is the deliverable — sysreptor.com/render is fast.
-```
-
-### Screenshot rules (CPTS examiners check these)
-
-- **Capture exact commands.** Examiners want to reproduce.
-- **Show the IP and hostname in every screenshot.** `PS1` with `\h@\u` or visible `ipconfig`/`ip a` adjacent.
-- **Don't redact lab credentials.** HTB labs are fine to show. Real engagements: redact per RoE.
-- **Capture FAILED attempts too** for the methodology section — shows you ruled out vectors.
-- **Drag-drop directly into SysReptor.** Don't reference external file paths in markdown — uses inline asset uploads.
-
-> **Scope reminder:** CPTS grading requires methodology demonstration, not just flags. A successful exploit with no documented methodology can still fail. Reverse: a documented attack chain with one missing flag often passes if walkthrough is solid.
-
-> **Local refs (live note-taking only):** the [CherryTree note-tree structure](reporting/cherrytree-structure.md) — useful as a Notes-tree organizer mirror in SysReptor. The [screenshot capture guide](reporting/screenshot-guide.md) — capture-tooling tips. The [generic report template](reporting/report-template.md) — markdown template if SysReptor is unavailable.
-
-[↑ Back to top](#cpts-penetration-testing-methodology)
-
----
-
-## Cross-File Canonical References
-
-Use these as the source of truth when topics overlap across files:
-
-| Topic | Canonical File |
-|---|---|
-| Network discovery, port scanning, and protocol triage | [enumeration-methodology.md](enumeration-methodology.md) |
-| Engagement workflow, scoping, rules of engagement, phase gating | [pentest-process.md](pentest-process.md) |
-| Vulnerability scanning, triage, CVSS prioritisation, FP validation | [vulnerability-assessment.md](vulnerability-assessment.md) |
-| Web app attack chains, injection testing, and API testing | [web-methodology.md](web-methodology.md) |
-| App-specific attack playbooks (Tomcat, Jenkins, GitLab, Confluence, …) | [attacking-common-applications.md](attacking-common-applications.md) |
-| Linux privilege escalation and post-foothold host work | [linux-methodology.md](linux-methodology.md) |
-| Windows privilege escalation, token abuse, and lateral movement | [windows-methodology.md](windows-methodology.md) |
-| AD attack chain from first creds to domain compromise | [active-directory-methodology.md](active-directory-methodology.md) |
-| BloodHound query logic and edge-to-action mapping | [bloodhound-guide.md](bloodhound-guide.md) |
-| Reverse / bind / web shells and payload generation | [shells-and-payloads.md](shells-and-payloads.md) |
-| Metasploit modules, Meterpreter, handlers, post-ex modules | [metasploit-framework.md](metasploit-framework.md) |
-| Targeted brute-force and password spraying per protocol | [login-brute-forcing.md](login-brute-forcing.md) |
-| AV/EDR evasion, AMSI/ETW bypass, in-memory loaders | [av-evasion.md](av-evasion.md) |
-| Tunnels, pivots, SOCKS, route-based access | [tunneling-pivoting.md](tunneling-pivoting.md) |
-| Upload, download, exfiltration, and living-off-the-land transfer methods | [file-transfers.md](file-transfers.md) |
-| Hash identification, cracking strategies, wordlist preparation | [password-cracking.md](password-cracking.md) |
+> Pick ONE on Day 0 and stick with it through Day 10.
 
 [↑ Back to top](#cpts-penetration-testing-methodology)
 

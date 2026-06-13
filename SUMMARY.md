@@ -40,6 +40,7 @@
 ## Reference
 
 * [Cheatsheet](cheatsheet.md)
+* [Automation Scripts](automation/README.md)
 
 ## Reporting
 

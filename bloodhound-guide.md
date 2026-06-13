@@ -67,9 +67,11 @@ export BHE_URL='http://localhost:8080'
 bloodhound-cli --token-id "$BHE_TOKEN_ID" --token-key "$BHE_TOKEN_KEY" \
   --url "$BHE_URL" upload ./bh.zip
 
-# === REST API — manual HMAC-signed request (preferred over raw bearer) ===
-# Quick auth check via simple bearer (older builds — `bhe` scheme):
+# === REST API — bearer token (works on most CE builds; HMAC-SHA256 required on 5.4+) ===
+# Quick auth check via bearer (older CE builds and BHE):
 curl -s -H "Authorization: bhe $BHE_TOKEN_KEY" "$BHE_URL/api/v2/self" | jq
+# CE 5.4+: bearer is rejected — use bloodhound-cli (handles HMAC signing) or
+# replicate the HMAC scheme from specterops/bloodhound-cli (sha256 of method+path+body, hex).
 
 # Run a Cypher query through the API
 curl -s -X POST "$BHE_URL/api/v2/graphs/cypher" \
@@ -262,8 +264,16 @@ RETURN u.name, u.enabled, u.admincount
 
 ### Unconstrained Delegation Computers (Non-DCs)
 ```cypher
+// Filter by Domain Controllers group RID 516 — robust against arbitrary DC hostnames
 MATCH (c:Computer {unconstraineddelegation:true})
-WHERE NOT c.name STARTS WITH "DC"
+WHERE NOT (c)-[:MemberOf*1..]->(:Group) WHERE NONE(g IN [(c)-[:MemberOf*1..]->(g:Group) | g.objectid] WHERE g ENDS WITH '-516')
+RETURN c.name, c.operatingsystem
+```
+
+```cypher
+// Simpler equivalent (single domain) — adjust <DOMAIN_SID> to your domain's SID
+MATCH (c:Computer {unconstraineddelegation:true})
+WHERE NOT (c)-[:MemberOf*1..]->(:Group {objectid:'<DOMAIN_SID>-516'})
 RETURN c.name, c.operatingsystem
 ```
 
@@ -462,7 +472,7 @@ Import-Module ActiveDirectory
 > | `1131f6ad-9c07-11d1-f79f-00c04fc2dcd2` | DS-Replication-Get-Changes-All |
 > | `1131f6ac-9c07-11d1-f79f-00c04fc2dcd2` | DS-Replication-Synchronize |
 > | `bf9679c0-0de6-11d0-a285-00aa003049e2` | Member (group) attribute write |
-> | `45ec5156-db7e-47bb-b53f-dbeb2d03c40f` | DS-Validated-Write-SPN (RBCD primitive) |
+> | `f3a64788-5306-11d1-a9c5-0000f80367c1` | Validated-Write-SPN (targeted Kerberoast primitive) |
 
 [↑ Back to top](#bloodhound-navigation-guide)
 
@@ -470,58 +480,58 @@ Import-Module ActiveDirectory
 
 ## BloodHound CE vs Legacy Compatibility
 
-> **Note:** The Cypher queries in this guide target **BloodHound Legacy** (Neo4j-backed). BloodHound CE (v5+) uses a PostgreSQL backend with a different API. Most queries here work in CE's "Custom Queries" panel, but be aware of these differences:
+> **Note:** Queries above target **BloodHound Legacy** (Neo4j Cypher direct). BloodHound CE issues Cypher via `/api/v2/graphs/cypher` and labels objects via Privilege Zones (e.g. the default `Owned` label, marked manually or via rules — not the same as Tier Zero / High Value).
 
 | Feature | Legacy (Neo4j) | CE (v5+) |
 |---------|----------------|----------|
 | Query language | Cypher directly | Cypher via `/api/v2/graphs/cypher` |
 | Node labels | `User`, `Computer`, `Group` | Same labels, different property names |
-| `owned` property | `{owned:true}` | `{system_tags:"admin_tier_0"}` or mark via UI |
-| `highvalue` property | `{highvalue:true}` | Tier-based: `admin_tier_0` |
+| `owned` property | `{owned:true}` | `{system_tags:"owned"}` or mark via UI |
+| `highvalue` property | `{highvalue:true}` | Tier Zero zone (system tag `admin_tier_0`) |
 | Data collection | SharpHound / bloodhound-python | AzureHound / SharpHound CE / bloodhound-ce-python |
 
-To adapt the queries above for CE, replace `{owned:true}` with the appropriate system tag filter, or use the built-in CE analysis queries under **Explore → Cypher**.
+To adapt the queries above for CE, replace `{owned:true}` with `{system_tags:"owned"}`, or use the built-in CE analysis queries under **Explore → Cypher**.
 
 ---
 
 ## ADCS-Related Queries
 
+> Queries below use BloodHound CE schema (`:EnterpriseCA`, `:CertTemplate`). Legacy 4.x used `:GPO {type:"..."}` overload — incompatible with CE.
+
 ### Find all ADCS Certificate Authorities
 ```cypher
-MATCH (ca:GPO) WHERE ca.type = "Enrollment Service"
+MATCH (ca:EnterpriseCA)
 RETURN ca.name, ca.domain
 ```
 
-### ESC1-Vulnerable Templates (Enrollee Supplies SAN + Client Auth EKU)
+### ESC1-Vulnerable Templates (Enrollee Supplies Subject + Client Auth EKU)
 ```cypher
-MATCH (t:GPO)-[:EnabledBy]->(ca)
-WHERE t.type = "Certificate Template"
-  AND t.`Enrollee Supplies Subject` = true
-  AND ANY(eku IN t.`Extended Key Usage` WHERE eku =~ '.*Client Auth.*')
-RETURN t.name AS template, ca.name AS ca, t.`Enrollment Rights` AS who_can_enroll
+MATCH (t:CertTemplate)-[:PublishedTo]->(ca:EnterpriseCA)
+WHERE t.enrolleesuppliessubject = true
+  AND t.authenticationenabled = true
+  AND t.requiresmanagerapproval = false
+RETURN t.name AS template, ca.name AS ca
 ```
 
 ### Users/Groups That Can Enroll in Any Template
 ```cypher
-MATCH (n)-[:Enroll|AutoEnroll]->(t:GPO)
-WHERE t.type = "Certificate Template"
-RETURN n.name, type(n) AS principal_type, t.name AS template
+MATCH (n)-[:Enroll|AutoEnroll]->(t:CertTemplate)
+RETURN n.name, labels(n) AS principal_type, t.name AS template
 ```
 
 ### Principals with Enrollment Agent Rights
 ```cypher
-MATCH (n)-[r:Enroll]->(t:GPO)
-WHERE t.type = "Certificate Template"
-  AND ANY(eku IN t.`Extended Key Usage` WHERE eku =~ '.*Certificate Request Agent.*')
+MATCH (n)-[:Enroll]->(t:CertTemplate)
+WHERE t.schemaversion >= 2
+  AND ANY(eku IN t.ekus WHERE eku CONTAINS '1.3.6.1.4.1.311.20.2.1')
 RETURN n.name, t.name AS agent_template
 ```
 
 ### Path from Owned to ADCS Abuse
 ```cypher
-MATCH p=shortestPath(
-  (n {owned:true})-[*1..]->(t:GPO)
+MATCH p = shortestPath(
+  (n {owned:true})-[*1..]->(t:CertTemplate)
 )
-WHERE t.type = "Certificate Template"
 RETURN p
 ```
 
