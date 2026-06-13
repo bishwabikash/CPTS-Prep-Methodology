@@ -971,6 +971,89 @@ readpst -o pst_out -m <FILE>.pst
 
 > **Common findings:** vendor portal logins, VPN PSKs, helpdesk-issued temp passwords, scheduled-task service-account passwords mailed to teams, BitLocker recovery keys, AD password rotation announcements, IT onboarding emails with default credentials.
 
+#### 3.7.2 Outlook .msg File Extraction (Standalone Compound Documents)
+
+Individual `.msg` files are OLE2 compound documents exported from Outlook (drag-and-drop, right-click Save As, or extracted from forensic images). Unlike PST/OST archives that contain entire mailboxes, each `.msg` is a single message with embedded headers, body, and MIME attachments. Found on SMB shares, FTP drops, user Desktops, and ticketing-system exports.
+
+```bash
+# Confirm filetype
+file <FILE>.msg
+# Expected: "CDFV2 Microsoft Outlook Message" or "Composite Document File V2"
+```
+
+```bash
+# msgconvert (libemail-outlook-message-perl) — converts .msg to RFC822 .eml
+# Ships on Kali/Parrot; available via apt on Debian/Ubuntu
+msgconvert <FILE>.msg
+# Produces <FILE>.eml in the same directory — standard MIME, readable by any MUA/grep
+
+# Batch convert all .msg files in a loot directory
+find /tmp/loot/ -iname '*.msg' -exec msgconvert {} \;
+
+# Cred-hunt across converted .eml files
+grep -RiE 'password|passwd|pwd|credential|secret|api.?key|token' /tmp/loot/*.eml
+grep -RiB2 -A2 'password.*(is|has been|changed|reset|new)' /tmp/loot/*.eml
+```
+
+```bash
+# extract_msg (Python — if already installed on the pentest distro)
+# Extracts headers, body text, HTML body, and all attachments into a per-message folder
+extract_msg <FILE>.msg
+extract_msg <FILE>.msg -o /tmp/msg_out/
+
+# Batch extraction
+find /tmp/loot/ -iname '*.msg' -exec extract_msg {} -o /tmp/msg_out/ \;
+
+# Grep extracted content
+grep -RiE 'password|credential|secret' /tmp/msg_out/
+```
+
+```bash
+# munpack (part of mpack — lightweight MIME unpacker)
+# Works on .eml produced by msgconvert; extracts MIME attachments to current dir
+munpack <FILE>.eml
+# Attachments land as separate files — inspect for .xlsx, .docx, .pdf, .zip containing creds
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure bash/python3 OLE2 extraction without pip install
+# Python3 olefile is part of the standard library on most pentest distros (ships with Pillow)
+# If olefile is unavailable, use the stdlib-only approach below
+
+# stdlib-only: dump raw OLE2 streams to disk using python3 zipfile-like access
+python3 -c "
+import olefile, sys, os
+ole = olefile.OleFileIO(sys.argv[1])
+outdir = sys.argv[1] + '_streams'
+os.makedirs(outdir, exist_ok=True)
+for stream in ole.listdir():
+    name = '_'.join(stream)
+    data = ole.openstream(stream).read()
+    open(os.path.join(outdir, name), 'wb').write(data)
+    if b'password' in data.lower() or b'credential' in data.lower():
+        print(f'[!] Potential cred in stream: {name}')
+ole.close()
+" <FILE>.msg
+
+# If olefile is NOT available — use strings + grep as a last resort
+strings <FILE>.msg | grep -iE 'password|passwd|pwd|credential|secret|api.?key|From:|To:|Subject:'
+
+# Windows LOTL — COM automation (Outlook must be installed)
+powershell -c "
+\$outlook = New-Object -ComObject Outlook.Application
+\$msg = \$outlook.Session.OpenSharedItem((Resolve-Path '<FILE>.msg').Path)
+Write-Output \"From: \$(\$msg.SenderEmailAddress)\"
+Write-Output \"To: \$(\$msg.To)\"
+Write-Output \"Subject: \$(\$msg.Subject)\"
+Write-Output \"Body: \$(\$msg.Body)\"
+\$msg.Attachments | ForEach-Object { \$_.SaveAsFile(\"C:\Windows\Temp\\\$(\$_.FileName)\"); Write-Output \"Attachment: \$(\$_.FileName)\" }
+"
+```
+
+> **Tip:** `.msg` files on user Desktops and `Downloads` folders frequently contain password-reset confirmations, VPN enrollment instructions, or shared-credential handoffs that never made it into the PST archive (drag-and-dropped out of Outlook before archival).
+
 ### 3.8 SMB (TCP 139 / 445)
 ```bash
 # Check null/guest session
@@ -1974,6 +2057,103 @@ sqlite3 out.db "SELECT * FROM auth_user;"
 > **Tip:** `mdbtools` only handles `.mdb` (Jet). For `.accdb` (Access 2007+) use `accdb-tools`, open in LibreOffice Base, or mount on a Windows VM with the Access ODBC driver.
 
 > **Common loot tables:** `auth_user`, `users`, `tblUsers`, `Logins`, `Accounts`, `Operators`, `tbl_Operator` — physical-security / HVAC / building-management vendor apps frequently store ops creds in plaintext.
+
+### 4.5 VyOS / Vyatta / EdgeOS Router Config Credential Harvest
+
+VyOS-based routers (VyOS, Vyatta, Ubiquiti EdgeOS) store their entire configuration in `/config/config.boot` — a plaintext hierarchical file containing interface IPs, static routes, firewall rules, VPN PSKs, RADIUS secrets, and user credentials (hashed or plaintext). Found after gaining shell access to the router via SSH, exploiting a web UI vuln, or mounting a backup archive from an SMB/FTP share.
+
+```bash
+# Locate the config file (default paths)
+cat /config/config.boot
+# Fallback locations on older Vyatta / EdgeOS images
+cat /opt/vyatta/etc/config/config.boot
+cat /config/config.boot.default
+
+# If you found a backup archive (.tar.gz / .img) on a share, extract first
+tar -xzf <BACKUP>.tar.gz -C /tmp/vyos_backup/
+find /tmp/vyos_backup/ -name 'config.boot' -exec cat {} \;
+```
+
+#### Credential extraction from config.boot
+
+```bash
+# User accounts — plaintext or hashed passwords
+grep -A5 'login {' /config/config.boot
+grep -E 'encrypted-password|plaintext-password' /config/config.boot
+# Format: user <USERNAME> { authentication { encrypted-password "<HASH>" } }
+# Hash is typically $6$ (SHA-512crypt) or $1$ (MD5crypt) — crack with hashcat -m 1800 / -m 500
+
+# VPN Pre-Shared Keys (IPsec / L2TP / OpenVPN)
+grep -iE 'pre-shared-secret|shared-secret|secret' /config/config.boot
+grep -B2 -A5 'ipsec' /config/config.boot
+grep -B2 -A5 'l2tp' /config/config.boot
+
+# OpenVPN secrets / TLS keys referenced in config
+grep -iE 'tls|openvpn|secret-file|cert-file|key-file' /config/config.boot
+
+# RADIUS / TACACS+ shared secrets
+grep -iE 'radius|tacacs' /config/config.boot
+grep -A3 'radius-server' /config/config.boot
+
+# SNMP community strings
+grep -A5 'snmp {' /config/config.boot
+grep 'community' /config/config.boot
+
+# BGP / OSPF / RIP authentication keys
+grep -iE 'md5|authentication|password' /config/config.boot | grep -v encrypted-password
+
+# Wi-Fi / wireless PSKs (EdgeOS with AirMax)
+grep -iE 'passphrase|wpa-passphrase|wireless' /config/config.boot
+
+# Static routes — map internal subnets reachable through this router
+grep -A2 'static {' /config/config.boot
+grep 'next-hop' /config/config.boot
+
+# Interface IPs — identify directly-attached networks for pivoting
+grep -E 'address [0-9]' /config/config.boot
+
+# DNS forwarders — may reveal internal DNS servers
+grep -A3 'dns {' /config/config.boot
+grep 'name-server' /config/config.boot
+
+# Full credential dump one-liner
+grep -iE 'password|secret|community|key |psk' /config/config.boot
+```
+
+```bash
+# Crack extracted password hashes
+# VyOS uses SHA-512crypt by default ($6$...)
+hashcat -m 1800 vyos_hashes.txt /usr/share/wordlists/rockyou.txt
+# Older Vyatta may use MD5crypt ($1$...)
+hashcat -m 500 vyos_hashes.txt /usr/share/wordlists/rockyou.txt
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# If on the VyOS box itself with limited shell (vbash / operational mode only)
+# VyOS operational-mode commands (no configure mode needed)
+show configuration
+show configuration commands | match password
+show configuration commands | match secret
+show configuration commands | match community
+
+# If vbash restricts commands but you can read files
+cat /config/config.boot | grep -iE 'password|secret|community|key |psk'
+
+# Pure POSIX sh (busybox / ash on EdgeOS) — no bash needed
+while IFS= read -r line; do
+  case "$line" in *password*|*secret*|*community*|*psk*) echo "$line" ;; esac
+done < /config/config.boot
+
+# From a remote pivot host with SSH access to the router
+ssh <USER>@<ROUTER_IP> 'cat /config/config.boot' | grep -iE 'password|secret|community|psk'
+
+# Windows LOTL — if config.boot was pulled to a Windows box
+findstr /i "password secret community psk key" config.boot
+```
+
+> **Tip:** VyOS config.boot often contains VPN PSKs that grant access to internal networks not visible from the DMZ. Cross-reference `next-hop` routes and interface addresses to identify new subnets for pivoting. RADIUS secrets unlock authentication to other network devices sharing the same RADIUS server.
 
 [Back to top](#enumeration--information-gathering-methodology)
 

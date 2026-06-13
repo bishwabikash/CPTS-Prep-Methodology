@@ -981,6 +981,159 @@ john --wordlist=/usr/share/wordlists/rockyou.txt 7z_hash.txt
 hashcat -m 11600 -a 0 7z_hashcat.txt /usr/share/wordlists/rockyou.txt
 ```
 
+### 5.11b ZipCrypto Known-Plaintext Attack (bkcrack / PkCrack)
+
+When a ZIP uses legacy ZipCrypto encryption (not AES-256), you can recover the internal encryption keys without brute-forcing the password if you possess at least 12 bytes of known plaintext from any file inside the archive. This bypasses password complexity entirely -- the attack recovers three 32-bit internal keys and uses them to decrypt all entries in the archive.
+
+```bash
+# === STEP 0: Identify ZipCrypto encryption (prerequisite check) ===
+# ZipCrypto = "ZipCrypto Deflate" or "ZipCrypto Store" in Method column
+# AES-256 = NOT vulnerable to this attack
+7z l -slt <ARCHIVE>.zip | grep -E 'Method|Path|Size|CRC'
+
+# Alternative: unzip -Z shows "Stra" (standard / traditional encryption = ZipCrypto)
+unzip -Z -v <ARCHIVE>.zip | grep -E 'file security|compression method'
+```
+
+#### bkcrack (preferred — faster, actively maintained)
+
+```bash
+# === STEP 1: Identify a file inside the ZIP whose content you can guess ===
+# Good candidates:
+#   - PNG files (first 16 bytes are always the same PNG header)
+#   - XML files in DOCX/XLSX (predictable <?xml ... ?> header)
+#   - Known config files, default index.html, README boilerplate
+#   - Any file you already have an unencrypted copy of
+
+# List archive contents with CRC to match against known plaintext
+bkcrack -L <ARCHIVE>.zip
+
+# === STEP 2: Prepare known plaintext ===
+# Option A: you have the full unencrypted file (or partial match >= 12 bytes)
+# Compress it with the SAME method (Store or Deflate) into a reference ZIP
+zip -0 plain.zip <KNOWN_FILE>    # -0 = Store (no compression)
+zip plain.zip <KNOWN_FILE>       # default Deflate
+
+# Option B: known header bytes only (e.g., PNG magic + IHDR)
+printf '\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52' > plain.bin
+
+# === STEP 3: Recover internal keys (main cryptanalytic step) ===
+# -C = encrypted archive, -c = target entry inside it
+# -P = plaintext ZIP (option A), -p = plaintext entry inside it
+bkcrack -C <ARCHIVE>.zip -c <ENCRYPTED_ENTRY> -P plain.zip -p <KNOWN_FILE>
+
+# Using raw plaintext bytes (option B) with offset if header is not at byte 0
+bkcrack -C <ARCHIVE>.zip -c <ENCRYPTED_ENTRY> -p plain.bin -o <OFFSET>
+
+# === STEP 4: Decrypt with recovered keys ===
+# -k = the three 32-bit keys from step 3 (printed as hex by bkcrack)
+bkcrack -C <ARCHIVE>.zip -k <KEY0> <KEY1> <KEY2> -D decrypted.zip
+
+# Alternatively, change the password to one you control
+bkcrack -C <ARCHIVE>.zip -k <KEY0> <KEY1> <KEY2> -U unlocked.zip <NEW_PASSWORD>
+
+# === STEP 5: Extract ===
+unzip decrypted.zip
+# or
+unzip -P <NEW_PASSWORD> unlocked.zip
+```
+
+#### PkCrack (legacy alternative)
+
+```bash
+# PkCrack requires the plaintext compressed into a ZIP with the same method.
+# The encrypted ZIP must use ZipCrypto (same prerequisite as bkcrack).
+
+# 1. Create plaintext ZIP with matching compression
+zip -0 plain.zip <KNOWN_FILE>    # Store
+zip plain.zip <KNOWN_FILE>       # Deflate (match the encrypted entry's method)
+
+# 2. Run the attack — extract_file = entry name inside the encrypted ZIP
+pkcrack -C <ARCHIVE>.zip -c <ENCRYPTED_ENTRY> -P plain.zip -p <KNOWN_FILE> -d decrypted.zip
+
+# 3. Extract result
+unzip decrypted.zip
+
+# CRC verification — confirm your plaintext matches before a long run
+crc32 <KNOWN_FILE>
+7z l -slt <ARCHIVE>.zip | grep CRC
+# CRC of your plaintext MUST match the CRC shown for that entry in the archive
+```
+
+#### Identifying good known-plaintext candidates
+
+```bash
+# PNG header (first 16 bytes — always identical across all PNGs)
+printf '\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52' > png_header.bin
+
+# DOCX/XLSX/PPTX — these are ZIPs containing [Content_Types].xml
+# The XML declaration is always: <?xml version="1.0" encoding="UTF-8"?>
+printf '<?xml version="1.0" encoding="UTF-8"?>' > xml_header.txt
+
+# PK header for nested ZIPs (ZIP inside ZIP): first 4 bytes always PK\x03\x04
+printf '\x50\x4b\x03\x04' > pk_header.bin
+
+# ELF binary header (if a compiled binary is inside the archive)
+printf '\x7fELF' > elf_header.bin
+
+# Java class file magic (if .class files are archived)
+printf '\xca\xfe\xba\xbe' > class_header.bin
+```
+
+#### Living-off-the-land / LOTL variant
+
+No pure built-in OS tool can perform the ZipCrypto known-plaintext cryptanalysis (it requires implementing Biham-Kocher's algorithm). The closest native approach:
+
+```bash
+# Verify encryption type without bkcrack/pkcrack installed
+# If "ZipCrypto" or "Traditional PKWARE" appears, the archive is vulnerable
+7z l -slt <ARCHIVE>.zip | grep Method
+unzip -Z -v <ARCHIVE>.zip 2>&1 | grep -i 'file security'
+file <ARCHIVE>.zip
+
+# CRC pre-check with native tools — confirm plaintext matches before acquiring bkcrack
+python3 -c "
+import binascii, sys
+with open(sys.argv[1], 'rb') as f:
+    data = f.read()
+print(format(binascii.crc32(data) & 0xFFFFFFFF, '08x'))
+" <KNOWN_FILE>
+# Compare against: unzip -Z -v <ARCHIVE>.zip | grep CRC
+
+# If Python3 is available but bkcrack is not, a minimal implementation:
+# (copies the bkcrack algorithm in pure Python — slow but works offline)
+python3 -c "
+import struct, sys, zipfile
+
+def update_keys(keys, b):
+    keys[0] = crc32(keys[0], b)
+    keys[1] = (keys[1] + (keys[0] & 0xFF)) & 0xFFFFFFFF
+    keys[1] = ((keys[1] * 134775813) + 1) & 0xFFFFFFFF
+    keys[2] = crc32(keys[2], (keys[1] >> 24) & 0xFF)
+    return keys
+
+def crc32(crc, b):
+    return CRC_TABLE[(crc ^ b) & 0xFF] ^ (crc >> 8)
+
+CRC_TABLE = []
+for i in range(256):
+    c = i
+    for _ in range(8):
+        c = (0xEDB88320 ^ (c >> 1)) if (c & 1) else (c >> 1)
+    CRC_TABLE.append(c)
+
+# This is the decryption half only — requires keys already recovered
+# For the full attack, bkcrack is needed (Biham-Kocher is ~500 lines)
+print('ZipCrypto LOTL: use bkcrack binary (pre-compiled, no install needed)')
+print('Download is a single static binary — no pip/apt required')
+"
+
+# Pragmatic LOTL: bkcrack ships as a single static binary with no dependencies.
+# Transfer it to the operator box via SCP/HTTP from your engagement toolkit.
+# No package manager, no pip, no compilation needed.
+# On the target (if you must run there): just drop the single binary.
+```
+
 ### 5.12 PDF / Office Documents
 
 ```bash

