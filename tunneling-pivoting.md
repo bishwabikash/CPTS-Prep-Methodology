@@ -1689,5 +1689,7 @@ sudo sed -i '/PSK "<PASSWORD>"/d' /etc/ipsec.secrets
 | **Multi-hop / deep pivot** | Ligolo-ng or Sliver | Clean multi-hop support |
 | **C2 with encrypted tunnel** | Sliver (mTLS/WG) | Built-in SOCKS5, pivot listeners, encrypted |
 | **Team operation / GUI needed** | Havoc | Cobalt Strike-like UI, shared sessions |
+| **UDP services needed (SNMP, DNS, NTP)** | Ligolo-ng or socat UDP relay | SOCKS/proxychains silently drops UDP; must use route-based or per-port relay |
+| **TCP filtered by IPSec policy (IKE on 500)** | strongSwan transport-mode SA | Establish SA with discovered PSK → ports become reachable |
 
 [Back to top](#table-of-contents)

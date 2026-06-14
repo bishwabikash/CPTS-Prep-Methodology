@@ -380,7 +380,7 @@ LIMIT 10
 | `AllowedToAct` | RBCD S4U (already configured) | Phase 5.3 |
 | `DCSync` | `impacket-secretsdump` | Phase 10.1 |
 | `AdminTo` | WinRM / psexec / wmiexec | [windows-methodology.md Phase 5.x](windows-methodology.md) |
-| `HasSession` | Token impersonation / coerce auth | Phase 5.1 |
+| `HasSession` | Lateral-move to that host → token theft (Incognito/Rubeus) | [windows-methodology.md Phase 5](windows-methodology.md) then token impersonation |
 | `CanPSRemote` | `evil-winrm` | [windows-methodology.md Phase 5.x](windows-methodology.md) |
 | `CanRDP` | `xfreerdp` | [windows-methodology.md Phase 5.x](windows-methodology.md) |
 | `SQLAdmin` | `impacket-mssqlclient`, xp_cmdshell | [enumeration-methodology.md §3.13](enumeration-methodology.md) |

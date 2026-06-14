@@ -774,6 +774,8 @@ ssh user@host -t '/tmp/bb sh'
 
 **Goal:** Elevate from standard user to root.
 
+> Priority from Phase 3 linpeas output (RED/YELLOW items): sudo (4.1) → SUID (4.2) → capabilities (4.3) → cron (4.4) → groups (4.12b) → kernel (4.7). **Nothing found?** → check internal services on 127.0.0.1 (4.15, port-forward and attack), hunt creds in files/history/configs (Phase 5.1), check writable service files (4.10), or pivot to another host if dual-homed (tunneling-pivoting.md).
+
 ### 4.1 Sudo Abuse
 
 ```bash

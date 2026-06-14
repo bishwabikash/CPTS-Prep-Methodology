@@ -13,6 +13,16 @@ For initial service discovery, see [enumeration-methodology.md](enumeration-meth
 - [Verify After Transfer (Hash Verification)](#verify-after-transfer-hash-verification)
 - [Living Off the Land (No External Tools)](#living-off-the-land-no-external-tools)
 
+**Method Selector (pick by constraint):**
+
+| Constraint | Methods |
+|---|---|
+| HTTP outbound blocked | SMB (`impacket-smbserver`), DNS exfil, ICMP, base64 over existing shell |
+| PowerShell CLM active | `certutil`, `bitsadmin`, `cmd /c echo` base64, see CLM section below |
+| Text-only channel (blind RCE) | base64 encode → echo → decode (`certutil -decode`/`base64 -d`) |
+| No outbound at all | establish tunnel first (tunneling-pivoting.md), or forward-shell (shells-and-payloads.md) |
+| Large file / integrity-critical | SMB or HTTP + verify with hash (see Verify section) |
+
 ---
 
 ## Linux Target (Downloading to Target)

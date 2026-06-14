@@ -1450,11 +1450,13 @@ done
 
 [↑ Top](#password-cracking-methodology)
 
+> **Hash won't crack?** (1) PtH where applicable — `netexec -H`, `evil-winrm -H`, `impacket -hashes` (see active-directory-methodology.md). (2) Relay the hash via ntlmrelayx (AD Phase 11). (3) Pivot to other cred sources: DPAPI, browser creds, config files, keytabs. Don't block on cracking — keep it running in background and pursue other vectors.
+
 ---
 
 ## Phase 6: Online Attacks (Brute-Force / Spraying)
 
-This file is for **offline** hash cracking. Online attacks (live brute-force / password spraying against a service) belong in [login-brute-forcing.md](login-brute-forcing.md):
+This file is for **offline** hash cracking. Online attacks (live brute-force / password spraying against a service) belong in [login-brute-forcing.md](login-brute-forcing.md) — read Phase 0 (Pre-Flight: lockout threshold) before any spray attempt:
 
 - [Phase 0: Pre-Flight Checks (password policy + lockout awareness)](login-brute-forcing.md#phase-0-pre-flight-checks)
 - [Phase 2: Hydra — Full Protocol Reference](login-brute-forcing.md#phase-2-hydra--full-protocol-reference)

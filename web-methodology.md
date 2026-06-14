@@ -5887,4 +5887,12 @@ Found HTTP/HTTPS? Follow this order:
 8. GOT A SHELL FROM WEB?
    → Stabilize: python3 -c 'import pty;pty.spawn("/bin/bash")'
    → Check OS → linux-methodology.md or windows-methodology.md
+
+9. NOTHING WORKED? Deepen recon before giving up:
+   → App unidentified: favicon hash + error-page style (1.1.2)
+   → Known OSS app: clone upstream, diff for added/unlinked endpoints (1.4.1)
+   → No obvious params: Arjun/ffuf param discovery + JS source review (1.5)
+   → JS-heavy SPA: pull .js.map and recover source (1.4)
+   → Re-check: .git, .env, .DS_Store, backup files, source-maps (1.4)
+   → Discovered vhosts: restart this flow from step 1 for EACH vhost
 ```

@@ -532,6 +532,8 @@ john --wordlist=wordlist.txt --rules=best64 hashes.txt
 
 **Goal:** For each open port/service, perform deep enumeration.
 
+> **Universal first step for EVERY service:** after `nmap -sV` gives a product+version, run `searchsploit <product> <version>` BEFORE brute-forcing. A version match (vsftpd 2.3.4, ProFTPd 1.3.5, Exim 4.87, HFS 2.3, etc.) is usually a faster foothold than credential attacks.
+
 ### 3.1 FTP (TCP 21)
 ```bash
 # Anonymous login check
@@ -828,6 +830,7 @@ nmap -p 88 -Pn <IP>
 # AS-REP Roasting (no creds needed) — full coverage in active-directory-methodology.md §1.4
 # Quick recall: impacket-GetNPUsers <DOMAIN>/ -dc-ip <IP> -usersfile users.txt -request -format hashcat
 ```
+> **Empty Kerberoast/AS-REP is normal** — it means no SPN or pre-auth-disabled accounts exist from this identity. Don't loop. Pivot to: password spraying (§1.5), share/config loot (§4), web-app foothold, or wait on Responder. Once you *do* get a credential, re-run with authenticated flags (active-directory-methodology.md "I Have Creds" flow).
 
 ### 3.7 POP3 / IMAP (TCP 110 / 143 / 993 / 995)
 ```bash
@@ -1939,6 +1942,8 @@ python3 ikeforce.py <TARGET> -s 1 -w /usr/share/wordlists/rockyou.txt -i <GROUP_
 ## Phase 4: Post-Credential Enumeration
 
 **Goal:** Once you have valid credentials, re-enumerate everything with authenticated access.
+
+> **How you got here:** creds come from Phase 3 loot (FTP/SMB files, LDAP descriptions, SNMP hrSWRunParameters, PST email, config files), cracked hashes from password-cracking.md, or password spraying (login-brute-forcing.md). **Got a HASH not a password?** Skip the cleartext spray — use Pass-the-Hash directly: `netexec smb -H <NT_HASH>`, `evil-winrm -H`, `impacket -hashes :<NT>`. See active-directory-methodology.md PtH/Overpass-the-Hash.
 
 ### 4.1 Immediate Re-Enumeration Checklist
 ```bash

