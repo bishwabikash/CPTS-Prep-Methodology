@@ -2,29 +2,6 @@
 
 A comprehensive, exam-ready methodology suite for HackTheBox CPTS certification and general penetration testing engagements.
 
-> **Version Sync**
-> - Last structural review: 2026-05-16
-> - If phase numbers or section numbers change in any methodology file, update this README workflow map and decision tables in the same edit.
-
-> **Known Constraints**
-> - Commands are operator templates. Replace placeholders, validate target-specific assumptions, and check `--help` for tool/version-specific syntax when needed.
-
-> **Lab vs Real Engagement**
-> - This methodology is optimized for **lab/exam targets** (HTB, CPTS, OffSec) which intentionally ship older configurations. Many "patched in 2025" techniques (Zerologon, noPac, PetitPotam unauth) still work on these targets.
-> - For **real engagements**, watch the OPSEC tags (🟢 quiet · 🟡 logged · 🔴 alert-likely) added throughout `active-directory-methodology.md`, `windows-methodology.md`, `linux-methodology.md`, `web-methodology.md`, and `tunneling-pivoting.md` — operations like DCSync `/all`, LSASS dumping (`comsvcs.dll`/procdump), kernel exploits (PwnKit/Baron Samedit/DirtyPipe), `sqlmap --os-shell`, ysoserial gadgets, and reverse `ssh -R` / bash `/dev/tcp` tunnels look benign here but are high-fidelity IOCs.
-
-> **Placeholder Convention** — used throughout this repo:
-> - `<TARGET>` / `<TARGET_IP>` = the box currently under attack (use `<TARGET_IP>` when an IP is required)
-> - `<INTERNAL_IP>` / `<INTERNAL_SUBNET>` / `<INTERNAL_DC_IP>` = post-pivot internal targets (role-qualified)
-> - `<USER>` / `<PASS>` / `<PASSWORD>` / `<DOMAIN>` = AD credential triple (long form preferred)
-> - `<HASH>` / `<HASH_TYPE>` = NTLM/Kerberos hash and its hashcat/john format identifier
-> - `<DC_IP>` / `<DC_FQDN>` / `<DC_HOSTNAME>` = Domain Controller (typed by what the command consumes)
-> - `<HOST>` / `<HOSTNAME>` = NetBIOS short name (use `<TARGET>` for "the box")
-> - `<TIMESTAMP>` / `<TS>` = Unix timestamp suffix on loot directories
-> - `<LISTENER>` = attacker-controlled callback IP/host
->
-> **New here?** Read **Day 0** first, then **Fast Start (First 15 Minutes)**, then jump to the **File Index**.
-
 ---
 
 ## Table of Contents

