@@ -804,7 +804,8 @@ Per-user `badPwdCount` pre-check beats blind cadence — query the DC's view of 
 
 ```bash
 # Pre-spray: read account-lockout-threshold and observation window (authoritative)
-nxc ldap <DC_IP> -u <USER> -p '<PASS>' -M policy
+nxc smb <DC_IP> -u <USER> -p '<PASS>' --pass-pol
+nxc ldap <DC_IP> -u <USER> -p '<PASS>' -M pso              # fine-grained (PSO) policies
 nxc ldap <DC_IP> -u <USER> -p '<PASS>' -M get-desc-users   # context
 
 # Same via raw LDAP (lockoutThreshold is in 100-nanosecond intervals for durations)

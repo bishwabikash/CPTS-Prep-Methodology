@@ -111,7 +111,8 @@ haiti '<HASH>'
 | 16600 | Electrum wallet | |
 | 17200 | PKZIP (Compressed) | |
 | 17210 | PKZIP (Uncompressed) | |
-| 17300 | SHA3-256 | |
+| 17300 | SHA3-224 | |
+| 17400 | SHA3-256 | |
 | 17600 | SHA3-512 | |
 | 18200 | Kerberos 5 AS-REP (RC4) | AS-REP Roast |
 | 18300 | Apple Secure Notes | |
@@ -1227,15 +1228,15 @@ mimikatz # dpapi::chrome /in:"C:\Users\<USER>\AppData\Local\Google\Chrome\User D
 # === Offline cracking — chosen-plaintext attack on master key ===
 # When you have the master key file but NO user password / hash → crack it.
 
-# DPAPI-domain (machine joined to AD) — mode 15300
+# DPAPI masterkey v1 ($DPAPImk$1*) — mode 15300 (local ctx) / 15310 (context 3)
 hashcat -m 15300 dpapi_mk_hash.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
 
-# DPAPI-local (workgroup / standalone) — mode 15310
-hashcat -m 15310 dpapi_mk_hash.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+# DPAPI masterkey v2 ($DPAPImk$2*, AD domain context) — mode 15900 (or 15910 ctx 3)
+hashcat -m 15900 dpapi_mk_hash.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
 
 # Hash format examples (extract via DPAPImk2john or DonPAPI):
-# $DPAPImk$1*1*S-1-5-21-...*aes256*sha512*8000*<IV>*<MK_BLOB>          (15300)
-# $DPAPImk$2*1*S-1-5-21-...*aes256*sha512*8000*<IV>*<MK_BLOB>          (15310)
+# $DPAPImk$1*1*S-1-5-21-...*aes256*sha512*8000*<IV>*<MK_BLOB>          (v1 → 15300)
+# $DPAPImk$2*1*S-1-5-21-...*aes256*sha512*8000*<IV>*<MK_BLOB>          (v2 → 15900)
 
 # DPAPImk2john — extract hashcat-compatible hash from raw master key file
 python3 /opt/john/run/DPAPImk2john.py --sid=<SID> --masterkey=<MK_FILE> --context=domain  > dpapi_mk_hash.txt

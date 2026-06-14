@@ -5959,8 +5959,8 @@ cat /var/spool/mail/* 2>/dev/null
 # ZIP files
 zip2john protected.zip > zip.hash
 john --wordlist=/usr/share/wordlists/rockyou.txt zip.hash
-# Or: hashcat -m 13600 zip.hash /usr/share/wordlists/rockyou.txt (PKZIP)
-# Or: hashcat -m 13000 zip.hash /usr/share/wordlists/rockyou.txt (RAR5)
+# Or: hashcat -m 13600 zip.hash /usr/share/wordlists/rockyou.txt (WinZip AES)
+# Or: hashcat -m 17200 zip.hash /usr/share/wordlists/rockyou.txt (PKZIP compressed; 17210 uncompressed)
 
 # Microsoft Office documents (.docx, .xlsx, .pptx)
 /usr/share/john/office2john.py protected.docx > office.hash
