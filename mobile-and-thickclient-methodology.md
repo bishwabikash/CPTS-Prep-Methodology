@@ -7,16 +7,6 @@
 - [shells-and-payloads.md](shells-and-payloads.md) — for embedded payload generation
 - [file-transfers.md](file-transfers.md) — for getting decompiled output back to attacker box
 
-## Table of Contents
-- [Phase 0: Triage Gate](#phase-0-triage-gate)
-- [Phase 1: Tooling Pre-Flight](#phase-1-tooling-pre-flight)
-- [Phase 2: Android (APK)](#phase-2-android-apk)
-- [Phase 3: iOS (.ipa)](#phase-3-ios-ipa)
-- [Phase 4: Thick-Client .NET](#phase-4-thick-client-net)
-- [Phase 5: Thick-Client Java (JAR)](#phase-5-thick-client-java-jar)
-- [Phase 6: Electron / Cordova / React Native](#phase-6-electron--cordova--react-native)
-- [Phase 7: Shadow API Discovery (cross-cutting)](#phase-7-shadow-api-discovery-cross-cutting)
-
 ---
 
 ## Phase 0: Triage Gate

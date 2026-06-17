@@ -7,19 +7,6 @@ For initial service discovery and port scanning, start with [Service discovery a
 Cross-references:
 - [mobile-and-thickclient-methodology.md](mobile-and-thickclient-methodology.md) — when scope includes mobile / thick-client and you need to surface backend APIs to feed back into this file's Phase 6
 
-## Table of Contents
-
-- [Phase 1: Reconnaissance & Information Gathering](#phase-1-reconnaissance--information-gathering)
-- [Phase 2: Authentication & Session Testing](#phase-2-authentication--session-testing)
-- [Phase 3: Injection Attacks](#phase-3-injection-attacks)
-- [Phase 4: File-Based Attacks](#phase-4-file-based-attacks)
-- [Phase 5: Business Logic & Misconfiguration](#phase-5-business-logic--misconfiguration)
-- [Phase 6: API Testing](#phase-6-api-testing)
-- [Phase 7: Framework-Specific Attacks](#phase-7-framework-specific-attacks)
-- [Phase 8: CMS-Specific Testing](#phase-8-cms-specific-testing)
-- [Quick Reference: Useful Wordlists](#quick-reference-useful-wordlists)
-- [Quick Reference: Web App Testing Flow](#quick-reference-web-app-testing-flow)
-
 ---
 
 ## Phase 1: Reconnaissance & Information Gathering

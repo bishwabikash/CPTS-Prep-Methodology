@@ -11,52 +11,6 @@ Cross-references:
 
 > **Note:** Always verify the target version against the CVE before attempting an exploit. Failed exploits can crash services and burn opportunities. Use `searchsploit -m` and read the PoC source first.
 
-## Table of Contents
-
-- [Phase 1: Apache Tomcat](#phase-1-apache-tomcat)
-- [Phase 2: Jenkins](#phase-2-jenkins)
-- [Phase 3: Splunk](#phase-3-splunk)
-- [Phase 4: GitLab](#phase-4-gitlab)
-- [Phase 5: WordPress](#phase-5-wordpress)
-- [Phase 6: Drupal](#phase-6-drupal)
-- [Phase 7: Joomla](#phase-7-joomla)
-- [Phase 7b: Generic CMS — Auth Admin → Extension Archive Upload → RCE](#phase-7b-generic-cms--auth-admin--extension-archive-upload--rce)
-- [Phase 8: Atlassian Confluence](#phase-8-atlassian-confluence)
-- [Phase 9: Atlassian Jira](#phase-9-atlassian-jira)
-- [Phase 10: JBoss / Wildfly](#phase-10-jboss--wildfly)
-- [Phase 11: Oracle WebLogic](#phase-11-oracle-weblogic)
-- [Phase 12: Adobe ColdFusion](#phase-12-adobe-coldfusion)
-- [Phase 13: PRTG Network Monitor](#phase-13-prtg-network-monitor)
-- [Phase 14: Cacti](#phase-14-cacti)
-- [Phase 14b: WSUS Server — CVE-2025-59287](#phase-14b-wsus-server--cve-2025-59287-unauth-system-rce)
-- [Phase 14c: Jupyter Notebook / JupyterLab](#phase-14c-jupyter-notebook--jupyterlab)
-- [Phase 14d: Apache Struts2](#phase-14d-apache-struts2)
-- [Phase 14e: Apache HTTPD (Modern CVEs)](#phase-14e-apache-httpd-modern-cves)
-- [Phase 14f: phpMyAdmin](#phase-14f-phpmyadmin)
-- [Phase 14g: Spring Boot Actuator](#phase-14g-spring-boot-actuator)
-- [Phase 14h: Elasticsearch & Kibana](#phase-14h-elasticsearch--kibana)
-- [Phase 14i: Container & Orchestrator](#phase-14i-container--orchestrator)
-- [Phase 14j: Apache CouchDB](#phase-14j-apache-couchdb)
-- [Phase 14k: Xdebug Debugger — Pre-Auth RCE](#phase-14k-xdebug-debugger--pre-auth-rce)
-- [Phase 14l: H2 Database Console](#phase-14l-h2-database-console-standalone)
-- [Phase 14m: Node-RED](#phase-14m-node-red-port-1880)
-- [Phase 14n: PowerShell Web Access (PSWA)](#phase-14n-powershell-web-access-pswa)
-- [Phase 14o: Zabbix](#phase-14o-zabbix--frontend-json-rpc-api--agent-10050-rce)
-- [Phase 14p: Moodle](#phase-14p-moodle)
-- [Phase 14q: Microsoft SharePoint](#phase-14q-microsoft-sharepoint--pre-auth-enumeration)
-- [Phase 14r: Haraka SMTP](#phase-14r-haraka-smtp--attachment-plugin-rce-cve-2016-1000282)
-- [Phase 14s: PostgreSQL — Post-Auth File R/W & RCE Primitives](#phase-14s-postgresql--post-auth-file-rw--rce-primitives)
-- [Phase 14t: Oracle Database (TNS Listener)](#phase-14t-oracle-database-tns-listener--tcp-1521)
-- [Phase 14u: Webmin / MiniServ](#phase-14u-webmin--miniserv-tcp-10000)
-- [Phase 14v: Microsoft SQL Server (TCP 1433)](#phase-14v-microsoft-sql-server-tcp-1433)
-- [Phase 14w: Openfire XMPP Server](#phase-14w-openfire-xmpp-server-tcp-90909091)
-- [Phase 14x: PHP-CGI Argument Injection — CVE-2024-4577](#phase-14x-php-cgi-argument-injection--cve-2024-4577)
-- [Phase 14y: PHP-FPM + Nginx Underflow RCE — CVE-2019-11043](#phase-14y-php-fpm--nginx-underflow-rce--cve-2019-11043)
-- [Phase 14z: Misc App CVEs (aiohttp, Git, CUPS, CrushFTP, Erlang, daloRADIUS, OpenSMTPD, OpenTSDB, PaperCut, phpLiteAdmin, PHPUnit, ZoneMinder)](#phase-14z-openfire--misc-app-cves--continued)
-- [Phase 15: Quick Reference — osTicket / MantisBT / OpenCart / Magento](#phase-15-quick-reference--osticket--mantisbt--opencart--magento)
-- [Phase 16: Generic CVE Lookup Workflow](#phase-16-generic-cve-lookup-workflow)
-- [Quick Reference Cheatsheet](#quick-reference-cheatsheet)
-
 ---
 
 ## Phase 1: Apache Tomcat

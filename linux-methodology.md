@@ -18,37 +18,7 @@ For credential cracking (hashes, Kerberoast, shadow), see [Password Cracking](pa
 >
 > **Domain-joined Linux hosts:** scripts auto-detect realm/sssd/krb5 join state and run comprehensive AD enum (anon LDAP probes, kerbrute no-preauth, nxc null-session, BadSuccessor scan, timeroast, DNS SRV records) into `domain_enum.txt`. If a Kerberos ticket is cached (`klist`) or `BLOODHOUND_USER`/`BLOODHOUND_PASS` env vars are set, BloodHound CE collection runs automatically (uses `bloodhound-ce-python` if installed) and drops the ZIP into `./loot_*/bloodhound/`. Otherwise the manual command is logged to `bloodhound/run.log`.
 
-## Table of Contents
-
-- [Phase 1: Reconnaissance & Service Enumeration](#phase-1-reconnaissance--service-enumeration)
-- [Phase 2: Initial Access & Foothold](#phase-2-initial-access--foothold)
-- [Phase 3: Local Enumeration](#phase-3-local-enumeration)
-- [Phase 4: Privilege Escalation](#phase-4-privilege-escalation)
-  - [4.1 Sudo Abuse](#41-sudo-abuse)
-  - [4.2 SUID / SGID Abuse](#42-suid--sgid-abuse)
-  - [4.3 Capabilities Abuse](#43-capabilities-abuse)
-  - [4.4 Cron Job Hijacking](#44-cron-job-hijacking)
-  - [4.5 Writable /etc/passwd](#45-writable-etcpasswd)
-  - [4.6 NFS no_root_squash](#46-nfs-no_root_squash)
-  - [4.7 Kernel & System Exploits — Qualys TRU Arsenal](#47-kernel--system-exploits--qualys-tru-arsenal)
-  - [4.8 MySQL/MariaDB UDF Privilege Escalation](#48-mysqlmariadb-udf-privilege-escalation)
-  - [4.9 Python Library Hijacking](#49-python-library-hijacking)
-  - [4.10 Systemd Timer & Service Abuse](#410-systemd-timer--service-abuse)
-  - [4.11 Docker Socket / Container Breakout](#411-docker-socket--container-breakout)
-  - [4.12 Path Hijacking](#412-path-hijacking)
-  - [4.13 Shared Library Hijacking](#413-shared-library-hijacking)
-  - [4.14 Fail2ban Privilege Escalation](#414-fail2ban-privilege-escalation)
-  - [4.15 Internal Service Enumeration (Post-Foothold)](#415-internal-service-enumeration-post-foothold)
-- [Phase 5: Post-Exploitation & Credential Harvesting](#phase-5-post-exploitation--credential-harvesting)
-  - [5.1 Credential Locations](#51-credential-locations)
-  - [5.2 Persistence](#52-persistence)
-- [Quick Reference: Post-Foothold Checklist](#quick-reference-post-foothold-checklist)
-- [Quick Reference: Privilege Escalation Decision Tree](#quick-reference-privilege-escalation-decision-tree)
-- [Quick Reference: Reverse Shells](#quick-reference-reverse-shells)
-- [Quick Reference: Shell Stabilization](#quick-reference-shell-stabilization)
-
 > **Note on subsection numbering:** Phase 4 and Phase 5 use a `N.M[base], N.Mb, N.Mc, ...` pattern where the unlettered base section is the first entry; lettered additions (`b`, `c`, `d`, ...) are appended subsections. There is no `4.1a` — `4.1` is itself the "a" entry.
-
 ---
 
 ## Phase 1: Reconnaissance & Service Enumeration

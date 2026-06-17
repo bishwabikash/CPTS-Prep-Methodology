@@ -4,23 +4,6 @@
 > **Time plan:** Day 1–2 → Enumerate everything. Day 3–7 → Exploit + Escalate. Day 8–10 → Report.
 > **Deep-dive references:** [enumeration-methodology.md](enumeration-methodology.md) · [linux-methodology.md](linux-methodology.md) · [windows-methodology.md](windows-methodology.md) · [active-directory-methodology.md](active-directory-methodology.md) · [bloodhound-guide.md](bloodhound-guide.md) · [web-methodology.md](web-methodology.md) · [tunneling-pivoting.md](tunneling-pivoting.md) · [password-cracking.md](password-cracking.md) · [file-transfers.md](file-transfers.md) · [shells-and-payloads.md](shells-and-payloads.md)
 
-## Table of Contents
-
-- [Phase 0: Host Discovery & Scanning](#-phase-0-host-discovery--scanning)
-- [Phase 1: Service Enumeration (By Port)](#-phase-1-service-enumeration-by-port)
-- [Phase 2: "I Have Creds" — Test Everything](#-phase-2-i-have-creds--test-everything)
-- [Linux: Post-Foothold → Root](#-linux-post-foothold--root)
-- [Windows: Post-Foothold → SYSTEM](#-windows-post-foothold--system)
-- [Active Directory: Attack Chain](#-active-directory-attack-chain)
-- [Web: Common Attack Quick-Ref](#-web-common-attack-quick-ref)
-- [Pivoting (Quick Commands)](#-pivoting-quick-commands)
-- [Hash Cracking (Quick Modes)](#-hash-cracking-quick-modes)
-- [File Transfer (Quick Methods)](#-file-transfer-quick-methods)
-- [Reverse Shells](#-reverse-shells)
-- [Exam Time Management](#-exam-time-management)
-- [Encoding Chain Decode (CTF / Layered Payloads)](#-encoding-chain-decode-ctf--layered-payloads)
-- [Classical Cipher Decoding (CTF Artifacts)](#-classical-cipher-decoding-ctf-artifacts)
-
 ---
 
 ## 🔍 Phase 0: Host Discovery & Scanning

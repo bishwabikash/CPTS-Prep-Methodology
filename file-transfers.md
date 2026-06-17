@@ -4,17 +4,7 @@ Quick reference for transferring files between attacker and target machines duri
 
 For initial service discovery, see [enumeration-methodology.md](enumeration-methodology.md). For pivoting, see [tunneling-pivoting.md](tunneling-pivoting.md).
 
-## Table of Contents
-
-- [Linux Target (Downloading to Target)](#linux-target-downloading-to-target)
-- [Windows Target (Downloading to Target)](#windows-target-downloading-to-target)
-- [Exfiltrating Data from Target](#exfiltrating-data-from-target)
-- [Restricted PowerShell / CLM Environments](#restricted-powershell--clm-environments)
-- [Verify After Transfer (Hash Verification)](#verify-after-transfer-hash-verification)
-- [Living Off the Land (No External Tools)](#living-off-the-land-no-external-tools)
-
 **Method Selector (pick by constraint):**
-
 | Constraint | Methods |
 |---|---|
 | HTTP outbound blocked | SMB (`impacket-smbserver`), DNS exfil, ICMP, base64 over existing shell |
@@ -22,7 +12,6 @@ For initial service discovery, see [enumeration-methodology.md](enumeration-meth
 | Text-only channel (blind RCE) | base64 encode → echo → decode (`certutil -decode`/`base64 -d`) |
 | No outbound at all | establish tunnel first (tunneling-pivoting.md), or forward-shell (shells-and-payloads.md) |
 | Large file / integrity-critical | SMB or HTTP + verify with hash (see Verify section) |
-
 ---
 
 ## Linux Target (Downloading to Target)

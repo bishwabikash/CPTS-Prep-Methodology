@@ -13,29 +13,6 @@ Cross-references:
 
 ---
 
-## Table of Contents
-
-- [Phase 0: AV/EDR Landscape](#phase-0-avedr-landscape)
-- [Phase 1: AMSI Bypass](#phase-1-amsi-bypass)
-- [Phase 2: msfvenom Encoders (limited utility)](#phase-2-msfvenom-encoders-limited-utility)
-- [Phase 3: Template Injection](#phase-3-template-injection)
-- [Phase 4: Donut — Shellcode from PE/.NET/Script](#phase-4-donut--shellcode-from-penetscript)
-- [Phase 5: Shikata Ga Nai (SGN) — Modern Encoder](#phase-5-shikata-ga-nai-sgn--modern-encoder)
-- [Phase 6: Manual XOR/RC4 Stub (Minimal C PoC)](#phase-6-manual-xorrc4-stub-minimal-c-poc)
-- [Phase 7: PE Loaders & Frameworks](#phase-7-pe-loaders--frameworks)
-- [Phase 8: Living-Off-The-Land Binaries (LOLBAS)](#phase-8-living-off-the-land-binaries-lolbas)
-- [Phase 9: ETW Patching](#phase-9-etw-patching)
-- [Phase 9b: Direct / Indirect Syscalls](#phase-9b-direct--indirect-syscalls)
-- [Phase 9c: ntdll Unhooking](#phase-9c-ntdll-unhooking)
-- [Phase 9d: Sleep Masking / Call-Stack Spoofing](#phase-9d-sleep-masking--call-stack-spoofing)
-- [Phase 9e: Modern Injection Variants](#phase-9e-modern-injection-variants)
-- [Phase 10: Defender-Specific Hunting Tools](#phase-10-defender-specific-hunting-tools)
-- [Phase 10b: InvisibilityCloak — C# Source-Level Obfuscation](#10b-invisibilitycloak--c-source-level-obfuscation)
-- [Phase 11: Office Macros & Document Lures](#phase-11-office-macros--document-lures)
-- [Phase 11b: AppLocker Publisher-Rule Bypass — Recovered CA Signing Key](#phase-11b-applocker-publisher-rule-bypass--recovered-ca-signing-key)
-- [LOTL Emphasis — In-Memory Everything](#lotl-emphasis--in-memory-everything)
-- [Quick Reference Cheatsheet](#quick-reference-cheatsheet)
-
 ---
 
 ## Phase 0: AV/EDR Landscape

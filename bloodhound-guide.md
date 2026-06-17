@@ -7,23 +7,6 @@ All Cypher queries run in the BloodHound UI → Analysis → Custom Query.
 
 ---
 
-## Table of Contents
-
-- [BloodHound CE Setup](#bloodhound-ce-setup)
-- [Step 0: Import Data](#step-0-import-data)
-  - [SharpHound Flag Matrix (Modern Collection Methods)](#sharphound-flag-matrix-modern-collection-methods)
-- [Step 1: Mark Your Owned Principals](#step-1-mark-your-owned-principals)
-- [Step 2: Find Paths from Owned Nodes](#step-2-find-paths-from-owned-nodes)
-- [Step 3: Outbound Control — All Rights from Owned Nodes](#step-3-outbound-control--all-rights-from-owned-nodes)
-- [Step 4: Common Attack-Specific Queries](#step-4-common-attack-specific-queries)
-- [Step 5: Cross-Trust / Forest Paths](#step-5-cross-trust--forest-paths)
-- [Step 6: Edge → Action Quick Map](#step-6-edge--action-quick-map)
-- [Manual ACL Discovery without SharpHound](#manual-acl-discovery-without-sharphound)
-- [BloodHound CE vs Legacy Compatibility](#bloodhound-ce-vs-legacy-compatibility)
-- [ADCS-Related Queries](#adcs-related-queries)
-  - [ADCS Edge → Action Map (ESC1–ESC15)](#adcs-edge--action-map-esc1esc15)
-- [Tips](#tips)
-
 ---
 
 ## BloodHound CE Setup

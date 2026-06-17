@@ -2,50 +2,6 @@
 
 The master reference for systematic enumeration during a penetration test. This file covers the overall workflow, host discovery, service enumeration per protocol, and post-credential enumeration. It is the starting point that feeds into the [Windows](windows-methodology.md), [Linux](linux-methodology.md), [Web](web-methodology.md), and [Active Directory](active-directory-methodology.md) methodology files.
 
-## Table of Contents
-
-- [Phase 0: Network & Host Discovery](#phase-0-network--host-discovery)
-- [Phase 1: Full Port Scanning](#phase-1-full-port-scanning)
-- [Phase 2: OSINT & Passive Reconnaissance](#phase-2-osint--passive-reconnaissance)
-- [Phase 3: Service-Specific Enumeration](#phase-3-service-specific-enumeration)
-  - [3.1 FTP (TCP 21)](#31-ftp-tcp-21)
-  - [3.2 SSH (TCP 22)](#32-ssh-tcp-22)
-  - [3.3 SMTP (TCP 25 / 465 / 587)](#33-smtp-tcp-25--465--587)
-  - [3.4 DNS (TCP/UDP 53)](#34-dns-tcpudp-53)
-  - [3.5 HTTP/HTTPS (TCP 80 / 443 / 8080 / 8443 / others)](#35-httphttps-tcp-80--443--8080--8443--others)
-  - [3.6 Kerberos (TCP 88)](#36-kerberos-tcp-88)
-  - [3.7 POP3 / IMAP (TCP 110 / 143 / 993 / 995)](#37-pop3--imap-tcp-110--143--993--995)
-  - [3.8 SMB (TCP 139 / 445)](#38-smb-tcp-139--445)
-  - [3.9 RPC / MSRPC (TCP 111 / 135)](#39-rpc--msrpc-tcp-111--135)
-  - [3.10 LDAP (TCP 389 / 636 / 3268 / 3269)](#310-ldap-tcp-389--636--3268--3269)
-  - [3.11 SNMP (UDP 161)](#311-snmp-udp-161)
-  - [3.12 NFS (TCP/UDP 2049)](#312-nfs-tcpudp-2049)
-  - [3.13 MSSQL (TCP 1433)](#313-mssql-tcp-1433)
-  - [3.14 MySQL / MariaDB (TCP 3306)](#314-mysql--mariadb-tcp-3306)
-  - [3.15 RDP (TCP 3389)](#315-rdp-tcp-3389)
-  - [3.16 WinRM (TCP 5985 / 5986)](#316-winrm-tcp-5985--5986)
-  - [3.17 Redis (TCP 6379)](#317-redis-tcp-6379)
-  - [3.18 rsync (TCP 873)](#318-rsync-tcp-873)
-  - [3.19 IPMI (UDP 623)](#319-ipmi-udp-623)
-  - [3.20 VNC (TCP 5900-5910)](#320-vnc-tcp-5900-5910)
-  - [3.21 Finger (TCP 79)](#321-finger-tcp-79)
-  - [3.22 PostgreSQL (TCP 5432)](#322-postgresql-tcp-5432)
-  - [3.23 Oracle TNS (TCP 1521)](#323-oracle-tns-tcp-1521)
-  - [3.24 Memcached (TCP 11211)](#324-memcached-tcp-11211)
-  - [3.25 TFTP (UDP 69)](#325-tftp-udp-69)
-  - [3.26 WMI (TCP 135)](#326-wmi-tcp-135)
-  - [3.27 R-Services (TCP 512 / 513 / 514)](#327-r-services-tcp-512--513--514)
-  - [3.28 Webmin / MiniServ (TCP 10000)](#328-webmin--miniserv-tcp-10000)
-  - [3.29 IRC (TCP 6667 / 6697)](#329-irc-tcp-6667--6697)
-  - [3.30 IKE/IPsec (UDP 500 / 4500)](#330-ikeipsec-udp-500--4500)
-- [Phase 4: Post-Credential Enumeration](#phase-4-post-credential-enumeration)
-- [Quick Reference: Enumeration by Port](#quick-reference-enumeration-by-port)
-- [Quick Reference: Username Enumeration Methods](#quick-reference-username-enumeration-methods)
-- [Quick Reference: Password Attack Methods](#quick-reference-password-attack-methods)
-- [Quick Reference: Hash Identification](#quick-reference-hash-identification)
-- [Common Hashcat Commands](#common-hashcat-commands)
-- [LOTL Quick Reference](#lotl-quick-reference)
-
 ---
 
 ## Phase 0: Network & Host Discovery

@@ -8,19 +8,6 @@ Cross-references:
 - [av-evasion.md](av-evasion.md) — payload obfuscation, AV/EDR-aware payload variants, donut/sgn/sRDI loaders
 - [file-transfers.md](file-transfers.md) — delivering payloads to target
 
-## Table of Contents
-
-- [Phase 0: Shell Types Overview](#phase-0-shell-types-overview)
-- [Phase 1: msfvenom Complete Reference](#phase-1-msfvenom-complete-reference)
-- [Phase 2: Reverse Shell Payloads (with LOTL Alternatives)](#phase-2-reverse-shell-payloads-with-lotl-alternatives)
-- [Phase 3: TTY Upgrade](#phase-3-tty-upgrade)
-- [Phase 4: Catching Shells with pwncat-cs](#phase-4-catching-shells-with-pwncat-cs)
-- [Phase 5: Web Shells](#phase-5-web-shells)
-- [Phase 6: Bind Shells](#phase-6-bind-shells)
-- [Phase 7: Detection Evasion Basics](#phase-7-detection-evasion-basics)
-- [Phase 8: Payload Delivery Vectors](#phase-8-payload-delivery-vectors)
-- [Quick Reference Cheatsheet](#quick-reference-cheatsheet)
-
 ---
 
 ## Phase 0: Shell Types Overview

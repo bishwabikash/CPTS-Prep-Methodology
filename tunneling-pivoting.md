@@ -6,27 +6,6 @@ For initial service discovery, see [Enumeration Methodology](enumeration-methodo
 
 > **Placeholder convention:** This file uses indexed placeholders for multi-hop chains: `<USER1>`/`<USER2>`/`<USER3>` are distinct credentials at hops 1/2/3; `<PIVOT_HOST_1>`/`<PIVOT_HOST_2>` are intermediate hosts; `<INTERNAL_TARGET_1>`/`<INTERNAL_TARGET_2>` are end-of-chain hosts in dual-target chains. Single-hop scenarios use `<USER>`, `<PIVOT_HOST>`, `<ATTACKER_IP>`, `<INTERNAL_TARGET>`.
 
-## Table of Contents
-
-- [SSH Tunneling](#ssh-tunneling)
-- [Ligolo-ng (Route-Based Pivoting)](#ligolo-ng-route-based-pivoting)
-- [Chisel](#chisel)
-- [rpivot, revsocks, gost (Chisel Fallbacks)](#rpivot-revsocks-gost-chisel-fallbacks)
-- [Socat](#socat)
-- [sshuttle](#sshuttle)
-- [Metasploit Pivoting (Route-Based)](#metasploit-pivoting-route-based)
-- [C2 Framework Pivoting](#c2-framework-pivoting)
-- [Windows-Specific Pivoting](#windows-specific-pivoting)
-- [Proxychains Configuration](#proxychains-configuration)
-- [Open HTTP Proxy Abuse (Squid / mod_proxy as a Pivot)](#open-http-proxy-abuse-squid--mod_proxy-as-a-pivot)
-- [DNS Tunneling (dnscat2)](#dns-tunneling-dnscat2)
-- [DNS Tunneling (iodine)](#dns-tunneling-iodine)
-- [ICMP Tunneling](#icmp-tunneling)
-- [Webshell Tunnels](#webshell-tunnels)
-- [Port-Knocking — Bypass Filtered SSH/Service Ports](#port-knocking--bypass-filtered-sshservice-ports)
-- [IPSec Transport Tunnel — Host Firewall Bypass (strongSwan)](#ipsec-transport-tunnel--host-firewall-bypass-strongswan)
-- [Quick Decision Guide](#quick-decision-guide)
-
 ---
 
 ## SSH Tunneling

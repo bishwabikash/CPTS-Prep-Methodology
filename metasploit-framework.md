@@ -8,21 +8,6 @@ Cross-references:
 - [domain abuse modules](active-directory-methodology.md)
 - [bypassing detection of msf payloads](av-evasion.md)
 
-## Table of Contents
-
-- [Phase 0: msfconsole Core Commands](#phase-0-msfconsole-core-commands)
-- [Phase 1: Module Taxonomy](#phase-1-module-taxonomy)
-- [Phase 2: Module Workflow](#phase-2-module-workflow)
-- [Phase 3: Resource Scripts and Automation](#phase-3-resource-scripts-and-automation)
-- [Phase 4: Database-Backed Workflow](#phase-4-database-backed-workflow)
-- [Phase 5: Meterpreter Essentials](#phase-5-meterpreter-essentials)
-- [Phase 6: Post-Exploitation Modules](#phase-6-post-exploitation-modules)
-  - [PtH Command Execution via Routed Pivot](#pth-command-execution-via-routed-pivot-psexec_command--smb_delivery)
-- [Phase 7: msfvenom Integration](#phase-7-msfvenom-integration)
-- [Phase 8: Common Pitfalls](#phase-8-common-pitfalls)
-- [Phase 9: Buffer Overflow Offset Workflow](#phase-9-buffer-overflow-offset-workflow)
-- [Quick Reference Cheatsheet](#quick-reference-cheatsheet)
-
 ---
 
 ## Phase 0: msfconsole Core Commands

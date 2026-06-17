@@ -8,23 +8,6 @@ Cross-references:
 - [web-methodology.md](web-methodology.md) — web application attacks
 - [enumeration-methodology.md](enumeration-methodology.md) — service identification
 
-## Table of Contents
-
-- [Phase 0: Pre-Flight Checks](#phase-0-pre-flight-checks)
-- [Phase 1: Wordlists](#phase-1-wordlists)
-- [Phase 2: Hydra — Full Protocol Reference](#phase-2-hydra--full-protocol-reference)
-- [Phase 3: Medusa](#phase-3-medusa)
-- [Phase 4: Ncrack — Best for RDP/SSH](#phase-4-ncrack--best-for-rdpssh)
-- [Phase 5: Patator — Modular & Flexible](#phase-5-patator--modular--flexible)
-- [Phase 6: NetExec (nxc) — Windows Spray](#phase-6-netexec-nxc--windows-spray)
-- [Phase 7: Kerberos-Specific Spraying](#phase-7-kerberos-specific-spraying)
-- [Phase 8: Web Login Brute (ffuf / wfuzz)](#phase-8-web-login-brute-ffuf--wfuzz)
-  - [JSON-Body Auth Endpoints (REST / SPA logins)](#json-body-auth-endpoints-rest--spa-logins)
-- [Phase 9: LOTL Brute Force](#phase-9-lotl-brute-force)
-- [Phase 10: Detection & Lockout Avoidance](#phase-10-detection--lockout-avoidance)
-  - [Lockout-Aware Spray (BadPwdCount Monitoring + Safety Floor)](#lockout-aware-spray-badpwdcount-monitoring--safety-floor)
-- [Quick Reference Cheatsheet](#quick-reference-cheatsheet)
-
 ---
 
 ## Phase 0: Pre-Flight Checks

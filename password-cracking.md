@@ -8,17 +8,6 @@ For credential harvesting and initial access, see [Enumeration methodology](enum
 
 ---
 
-## Table of Contents
-
-- [Phase 1: Hash Identification](#phase-1-hash-identification)
-- [Phase 2: Wordlist Preparation](#phase-2-wordlist-preparation)
-- [Phase 3: Hashcat Attacks](#phase-3-hashcat-attacks)
-- [Phase 4: John the Ripper](#phase-4-john-the-ripper)
-- [Phase 5: Cracking Strategies by Hash Type](#phase-5-cracking-strategies-by-hash-type)
-- [Phase 6: Online Attacks (Brute-Force / Spraying)](#phase-6-online-attacks-brute-force--spraying)
-- [Phase 7: Cryptographic Recovery (Non-Hash)](#phase-7-cryptographic-recovery-non-hash)
-- [Quick Reference Tables](#quick-reference-tables)
-
 ---
 
 ## Phase 1: Hash Identification

