@@ -15,6 +15,7 @@
 
 * [Web Methodology](web-methodology.md)
 * [Attacking Common Applications](attacking-common-applications.md)
+* [Attacking MCP Servers & AI Tooling](attacking-mcp-ai.md)
 * [Login Brute-Forcing](login-brute-forcing.md)
 
 ## Post-Foothold

