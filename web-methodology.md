@@ -5822,7 +5822,7 @@ curl -s "http://<TARGET>:8080/job/<JOB>/config.xml"
 | Usernames | `/usr/share/seclists/Usernames/Names/names.txt` |
 | Default creds | `/usr/share/seclists/Passwords/Default-Credentials/` |
 | LFI paths | `/usr/share/seclists/Fuzzing/LFI/LFI-Jhaddix.txt` |
-| SQL injection | `/usr/share/seclists/Fuzzing/SQLi/` |
+| SQL injection | `/usr/share/seclists/Fuzzing/Databases/SQLi/` |
 | API endpoints | `/usr/share/seclists/Discovery/Web-Content/api/` |
 
 ---

@@ -149,9 +149,9 @@ sudo gunzip /usr/share/wordlists/rockyou.txt.gz
 | Wordlist | Path | Size | Use Case |
 |---|---|---|---|
 | rockyou.txt | `/usr/share/wordlists/rockyou.txt` | ~14M lines | General cracking |
-| darkweb2017-top10000 | `/usr/share/seclists/Passwords/darkweb2017-top10000.txt` | 10K lines | Quick spray |
-| xato-net-10-million | `/usr/share/seclists/Passwords/xato-net-10-million-passwords.txt` | 5.2M lines | Extended cracking |
-| common-passwords-win | `/usr/share/seclists/Passwords/Common-Credentials/10-million-password-list-top-1000000.txt` | 1M lines | Mid-range |
+| darkweb2017-top10000 | `/usr/share/seclists/Passwords/Common-Credentials/darkweb2017_top-10000.txt` | 10K lines | Quick spray |
+| xato-net-10-million | `/usr/share/seclists/Passwords/Common-Credentials/xato-net-10-million-passwords.txt` | 5.2M lines | Extended cracking |
+| common-passwords-win | `/usr/share/seclists/Passwords/Common-Credentials/xato-net-10-million-passwords.txt` | 1M lines | Mid-range |
 | best1050 | `/usr/share/seclists/Passwords/Common-Credentials/best1050.txt` | 1050 lines | Fast spray |
 | seasons/months combos | Custom | Variable | Targeted spray |
 
@@ -187,7 +187,7 @@ username-anarchy --input-file names.txt > usernames.txt
 kwp basechars/full.base keymaps/en-us.keymap routes/2-to-16-max-3-direction-changes.route -o keyboard_walks.txt
 
 # hashcat --stdout — apply rules to a wordlist without cracking (generate candidates)
-hashcat --stdout -r /usr/share/hashcat/rules/best64.rule wordlist.txt > expanded_wordlist.txt
+hashcat --stdout -r /usr/share/john/rules/best64.rule wordlist.txt > expanded_wordlist.txt
 
 # Generate Season+Year combos (common AD passwords)
 for season in Spring Summer Fall Winter Autumn; do
@@ -259,25 +259,25 @@ cut -d: -f2- ~/.local/share/hashcat/hashcat.potfile | sort -u > cracked_password
 # === FAST HASHES — full rockyou + best64 in one shot. <30 sec. ===
 
 # NTLM (Windows local hashes, secretsdump output)
-hashcat -m 1000 <HASH> /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 1000 <HASH> /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 
 # NetNTLMv2 (Responder captures)
-hashcat -m 5600 <HASH> /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 5600 <HASH> /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 
 # Kerberos AS-REP (GetNPUsers output)
-hashcat -m 18200 <HASH> /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 18200 <HASH> /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 
 # Kerberoast TGS (GetUserSPNs output)
-hashcat -m 13100 <HASH> /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 13100 <HASH> /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 
 # MD5
-hashcat -m 0 <HASH> /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 0 <HASH> /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 
 # SHA1
-hashcat -m 100 <HASH> /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 100 <HASH> /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 
 # SHA256
-hashcat -m 1400 <HASH> /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 1400 <HASH> /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 
 # bcrypt $2a$ / $2b$ / $2y$  — slow even on GPU; head-first
 hashcat -m 3200 <HASH> /usr/share/wordlists/rockyou.txt --username
@@ -288,7 +288,7 @@ hashcat -m <MODE> <HASH> /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/
 
 # === IF OneRule MISSED — context-aware list (build first, see §2.2 / spray_t1.txt) ===
 
-hashcat -m <MODE> <HASH> spray_t1.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m <MODE> <HASH> spray_t1.txt -r /usr/share/john/rules/best64.rule
 
 # === IF still missed AND password looks structured — mask attack ===
 
@@ -304,7 +304,7 @@ hashcat -m <MODE> <HASH> -a 3 -a 6 wordlist.txt '?d?d?d?d'        # cewl + 4 dig
 # Slow-hash escalation
 head -n 1000000 /usr/share/wordlists/rockyou.txt > rockyou-1m.txt
 hashcat -m 3200 <HASH> rockyou-1m.txt                              # naked
-hashcat -m 3200 <HASH> rockyou-1m.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 3200 <HASH> rockyou-1m.txt -r /usr/share/john/rules/best64.rule
 ```
 
 **Always-on flags for the 4050:**
@@ -323,7 +323,7 @@ hashcat -m 3200 <HASH> rockyou-1m.txt -r /usr/share/hashcat/rules/best64.rule
 hashcat -m <MODE> -a 0 hash.txt /usr/share/wordlists/rockyou.txt
 
 # With rules for mangling (most effective single attack)
-hashcat -m <MODE> -a 0 hash.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m <MODE> -a 0 hash.txt /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 
 # With multiple rule files (applied sequentially — rule1 then rule2)
 hashcat -m <MODE> -a 0 hash.txt wordlist.txt -r rules1.rule -r rules2.rule
@@ -408,9 +408,27 @@ hashcat -m <MODE> -a 7 hash.txt '20?d?d' wordlist.txt
 
 ### 3.5 Rule-Based Attacks
 
+> **Day-0 rule-file check.** Two gotchas on stock Kali, both silent failures mid-crack:
+> 1. **`best64.rule` is NOT in `/usr/share/hashcat/rules/`** — it ships with john at `/usr/share/john/rules/best64.rule`. hashcat reads it fine; just use the john path (all commands in this suite already do). The hashcat dir has `best66.rule`, which is a different file.
+> 2. **`OneRuleToRuleThemAll.rule` is not packaged at all** — it is third-party. Install it once before the exam:
+>
+> ```bash
+> sudo curl -fsSL -o /usr/share/hashcat/rules/OneRuleToRuleThemAll.rule \
+>   https://raw.githubusercontent.com/NotSoSecure/password_cracking_rules/master/OneRuleToRuleThemAll.rule
+> ls -la /usr/share/hashcat/rules/OneRuleToRuleThemAll.rule    # verify before you rely on it
+> ```
+>
+> Verify every rule file resolves before the clock starts:
+> ```bash
+> for r in /usr/share/john/rules/best64.rule \
+>          /usr/share/hashcat/rules/{OneRuleToRuleThemAll,dive,d3ad0ne,rockyou-30000}.rule; do
+>   [ -e "$r" ] && echo "OK   $r" || echo "MISS $r"
+> done
+> ```
+
 ```bash
 # Use best64 — fast, good hit rate
-hashcat -m <MODE> -a 0 hash.txt wordlist.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m <MODE> -a 0 hash.txt wordlist.txt -r /usr/share/john/rules/best64.rule
 
 # OneRuleToRuleThemAll — comprehensive, slower but higher success
 hashcat -m <MODE> -a 0 hash.txt wordlist.txt -r /usr/share/hashcat/rules/OneRuleToRuleThemAll.rule
@@ -539,7 +557,7 @@ hashcat --stdout -a 0 cracked.txt | sp64.bin --pw-min=8 --pw-max=12 hashcat.hcst
 sp64.bin --pw-min=8 --pw-max=10 /usr/share/hashcat/hashcat.hcstat2 | hashcat -a 0 -m <MODE> hashes.txt
 
 # Combine: best64 rules on top of a hybrid attack
-hashcat -a 6 -m <MODE> hashes.txt rockyou.txt ?d?d -r /usr/share/hashcat/rules/best64.rule
+hashcat -a 6 -m <MODE> hashes.txt rockyou.txt ?d?d -r /usr/share/john/rules/best64.rule
 ```
 
 ### 3.9 Quick-Win Patterns (Default Escalation Ladder)
@@ -562,7 +580,7 @@ hashcat -m <MODE> <HASH> -a 3 '?u?l?l?l?l?l?l20?d?d?s'    # Welcome2025!
 # Build user-as-pass list from extracted users
 awk -F: '{print $1}' users.txt > username_list.txt
 hashcat -m <MODE> <HASH> username_list.txt --username
-hashcat -m <MODE> <HASH> username_list.txt --username -r /usr/share/hashcat/rules/best64.rule
+hashcat -m <MODE> <HASH> username_list.txt --username -r /usr/share/john/rules/best64.rule
 # Hashcat built-in rule that derives passwords from usernames (if present in distro)
 hashcat -m <MODE> <HASH> username_list.txt -r /usr/share/hashcat/rules/unix-ninja-leetspeak.rule
 ```
@@ -618,7 +636,7 @@ hashcat -m <MODE> <HASH> common_lazy.txt
 cewl http://<TARGET> -d 3 -m 4 -w cewl_<TARGET>.txt
 
 # Apply common substitutions: a→@, e→3, i→1, o→0, s→$, append year/!/123
-hashcat -m <MODE> <HASH> cewl_<TARGET>.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m <MODE> <HASH> cewl_<TARGET>.txt -r /usr/share/john/rules/best64.rule
 hashcat -m <MODE> <HASH> cewl_<TARGET>.txt -r /usr/share/hashcat/rules/leetspeak.rule
 hashcat -m <MODE> <HASH> cewl_<TARGET>.txt -r /usr/share/hashcat/rules/OneRuleToRuleThemAll.rule
 
@@ -640,7 +658,7 @@ impacket-secretsdump -ntds NTDS.dit -system SYSTEM LOCAL -outputfile domain_dump
 
 # 2) Crack — keep username mapping with --username
 hashcat -m 1000 domain_dump.ntds /usr/share/wordlists/rockyou.txt --username -o cracked.txt
-hashcat -m 1000 domain_dump.ntds rockyou.txt --username -r /usr/share/hashcat/rules/best64.rule -o cracked.txt
+hashcat -m 1000 domain_dump.ntds rockyou.txt --username -r /usr/share/john/rules/best64.rule -o cracked.txt
 
 # 3) Show user:plaintext mapping (post-crack)
 hashcat -m 1000 domain_dump.ntds --show --username | awk -F: '{print $1":"$NF}' | tee user_pass.txt
@@ -798,7 +816,7 @@ john --wordlist=/usr/share/wordlists/rockyou.txt mozilla_hash.txt
 # Fast hash — GPU shreds these. Try large wordlists + aggressive rules.
 
 # Quick win: rockyou + best64
-hashcat -m 1000 -a 0 ntlm_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 1000 -a 0 ntlm_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 
 # Extended: rockyou + OneRule
 hashcat -m 1000 -a 0 ntlm_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/OneRuleToRuleThemAll.rule
@@ -807,7 +825,7 @@ hashcat -m 1000 -a 0 ntlm_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/sh
 hashcat -m 1000 -a 3 ntlm_hashes.txt '?a?a?a?a?a?a?a?a' --increment --increment-min 1
 
 # Common AD pattern: Season+Year+Special
-hashcat -m 1000 -a 0 ntlm_hashes.txt seasonal_passwords.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 1000 -a 0 ntlm_hashes.txt seasonal_passwords.txt -r /usr/share/john/rules/best64.rule
 
 # Pass-the-hash instead of cracking (if only need access)
 # See active-directory-methodology.md and windows-methodology.md
@@ -820,13 +838,13 @@ hashcat -m 1000 -a 0 ntlm_hashes.txt seasonal_passwords.txt -r /usr/share/hashca
 # Medium-speed hash — rules are key
 
 # Standard attack
-hashcat -m 5600 -a 0 netntlmv2_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 5600 -a 0 netntlmv2_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 
 # Extended attack
 hashcat -m 5600 -a 0 netntlmv2_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/OneRuleToRuleThemAll.rule
 
 # Targeted: cewl output + rules
-hashcat -m 5600 -a 0 netntlmv2_hashes.txt cewl_wordlist.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 5600 -a 0 netntlmv2_hashes.txt cewl_wordlist.txt -r /usr/share/john/rules/best64.rule
 
 # Cannot pass-the-hash with NetNTLMv2 — must crack or relay
 ```
@@ -840,13 +858,13 @@ hashcat -m 5600 -a 0 netntlmv2_hashes.txt cewl_wordlist.txt -r /usr/share/hashca
 # Medium-cost hash — wordlist + rules is the standard approach
 
 # Standard
-hashcat -m 13100 -a 0 tgs_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 13100 -a 0 tgs_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 
 # Extended
 hashcat -m 13100 -a 0 tgs_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/OneRuleToRuleThemAll.rule
 
 # Targeted: company keywords + rules
-hashcat -m 13100 -a 0 tgs_hashes.txt company_passwords.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 13100 -a 0 tgs_hashes.txt company_passwords.txt -r /usr/share/john/rules/best64.rule
 
 # Hybrid: word + 4 digits
 hashcat -m 13100 -a 6 tgs_hashes.txt /usr/share/wordlists/rockyou.txt '?d?d?d?d'
@@ -856,7 +874,7 @@ hashcat -m 13100 -a 6 tgs_hashes.txt /usr/share/wordlists/rockyou.txt '?d?d?d?d'
 
 ```bash
 # Slower than RC4 — same strategies but expect longer run times
-hashcat -m 19700 -a 0 tgs_aes_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 19700 -a 0 tgs_aes_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 ```
 
 ### 5.5 AS-REP Roast (Mode 18200)
@@ -867,7 +885,7 @@ hashcat -m 19700 -a 0 tgs_aes_hashes.txt /usr/share/wordlists/rockyou.txt -r /us
 # Same strategy as Kerberoast — these are typically weak passwords
 
 # Standard
-hashcat -m 18200 -a 0 asrep_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 18200 -a 0 asrep_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 
 # Extended
 hashcat -m 18200 -a 0 asrep_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/OneRuleToRuleThemAll.rule
@@ -878,7 +896,7 @@ hashcat -m 18200 -a 0 asrep_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/
 ```bash
 # Very slow — use targeted wordlists first
 hashcat -m 19900 -a 0 krb5_aes256_hashes.txt /usr/share/wordlists/rockyou.txt
-hashcat -m 19900 -a 0 krb5_aes256_hashes.txt company_passwords.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 19900 -a 0 krb5_aes256_hashes.txt company_passwords.txt -r /usr/share/john/rules/best64.rule
 ```
 
 ### 5.7 bcrypt (Mode 3200)
@@ -887,10 +905,10 @@ hashcat -m 19900 -a 0 krb5_aes256_hashes.txt company_passwords.txt -r /usr/share
 # VERY slow hash — even GPUs are slow. Use small, targeted wordlists.
 
 # Small wordlist first
-hashcat -m 3200 -a 0 bcrypt_hashes.txt /usr/share/seclists/Passwords/darkweb2017-top10000.txt
+hashcat -m 3200 -a 0 bcrypt_hashes.txt /usr/share/seclists/Passwords/Common-Credentials/darkweb2017_top-10000.txt
 
 # Then with rules on small list
-hashcat -m 3200 -a 0 bcrypt_hashes.txt /usr/share/seclists/Passwords/Common-Credentials/best1050.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 3200 -a 0 bcrypt_hashes.txt /usr/share/seclists/Passwords/Common-Credentials/best1050.txt -r /usr/share/john/rules/best64.rule
 
 # rockyou WITHOUT rules (rules multiply time enormously)
 hashcat -m 3200 -a 0 bcrypt_hashes.txt /usr/share/wordlists/rockyou.txt
@@ -905,13 +923,13 @@ hashcat -m 3200 -a 0 bcrypt_hashes.txt /usr/share/wordlists/rockyou.txt
 # Dumped via secretsdump from registry hives
 
 # Targeted attack
-hashcat -m 2100 -a 0 dcc2_hashes.txt /usr/share/seclists/Passwords/darkweb2017-top10000.txt
+hashcat -m 2100 -a 0 dcc2_hashes.txt /usr/share/seclists/Passwords/Common-Credentials/darkweb2017_top-10000.txt
 
 # Small wordlist + best64
-hashcat -m 2100 -a 0 dcc2_hashes.txt /usr/share/seclists/Passwords/Common-Credentials/best1050.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 2100 -a 0 dcc2_hashes.txt /usr/share/seclists/Passwords/Common-Credentials/best1050.txt -r /usr/share/john/rules/best64.rule
 
 # Company-specific keywords
-hashcat -m 2100 -a 0 dcc2_hashes.txt company_passwords.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 2100 -a 0 dcc2_hashes.txt company_passwords.txt -r /usr/share/john/rules/best64.rule
 ```
 
 ### 5.9 KeePass (.kdbx)
@@ -928,7 +946,7 @@ john --wordlist=/usr/share/wordlists/rockyou.txt keepass_hash.txt
 
 # Crack with hashcat (mode 13400) — slow hash
 hashcat -m 13400 -a 0 keepass_hashcat.txt /usr/share/wordlists/rockyou.txt
-hashcat -m 13400 -a 0 keepass_hashcat.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 13400 -a 0 keepass_hashcat.txt /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 
 # If keyfile is used in addition to password, extraction must include it
 keepass2john -k keyfile.key Database.kdbx > keepass_hash.txt
@@ -1142,11 +1160,11 @@ john --wordlist=/usr/share/wordlists/rockyou.txt office_hash.txt
 
 ```bash
 # MSSQL (2012+) — mode 1731
-hashcat -m 1731 -a 0 mssql_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 1731 -a 0 mssql_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 
 # MySQL 4.1+ — mode 300
 # Strip the * prefix from the hash
-hashcat -m 300 -a 0 mysql_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 300 -a 0 mysql_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 
 # PostgreSQL MD5 — mode 12 (raw) or use john
 # Hash format: md5<32hex> where hash = MD5(password + username)
@@ -1167,7 +1185,7 @@ john --format=dynamic_1 --wordlist=/usr/share/wordlists/rockyou.txt pg_hash.txt
 unshadow /etc/passwd /etc/shadow > unshadowed.txt
 
 # SHA-512 crypt — hashcat
-hashcat -m 1800 -a 0 shadow_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 1800 -a 0 shadow_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 
 # SHA-512 crypt — john
 john --wordlist=/usr/share/wordlists/rockyou.txt --format=sha512crypt shadow_hashes.txt
@@ -1176,7 +1194,7 @@ john --wordlist=/usr/share/wordlists/rockyou.txt --format=sha512crypt shadow_has
 john --wordlist=/usr/share/wordlists/rockyou.txt --format=yescrypt shadow_hashes.txt
 
 # MD5 crypt — mode 500
-hashcat -m 500 -a 0 md5crypt_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 500 -a 0 md5crypt_hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 ```
 
 ### 5.15 DPAPI Master Key + Blob Cracking
@@ -1218,10 +1236,10 @@ mimikatz # dpapi::chrome /in:"C:\Users\<USER>\AppData\Local\Google\Chrome\User D
 # When you have the master key file but NO user password / hash → crack it.
 
 # DPAPI masterkey v1 ($DPAPImk$1*) — mode 15300 (local ctx) / 15310 (context 3)
-hashcat -m 15300 dpapi_mk_hash.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 15300 dpapi_mk_hash.txt /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 
 # DPAPI masterkey v2 ($DPAPImk$2*, AD domain context) — mode 15900 (or 15910 ctx 3)
-hashcat -m 15900 dpapi_mk_hash.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 15900 dpapi_mk_hash.txt /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 
 # Hash format examples (extract via DPAPImk2john or DonPAPI):
 # $DPAPImk$1*1*S-1-5-21-...*aes256*sha512*8000*<IV>*<MK_BLOB>          (v1 → 15300)
@@ -1263,10 +1281,13 @@ hashcat -m 13741 veracrypt_header.bin /usr/share/wordlists/rockyou.txt
 
 # VeraCrypt non-boot — see `hashcat --help | grep -i veracrypt` for full list
 # 13711 (SHA-512 + AES), 13712 (SHA-512 + Serpent), 13713 (SHA-512 + Twofish), etc.
-hashcat -m 13711 veracrypt_header.bin /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 13711 veracrypt_header.bin /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 
-# VeraCrypt with PIM (Personal Iteration Multiplier) — pass with --veracrypt-pim
-hashcat -m 13711 veracrypt_header.bin rockyou.txt --veracrypt-pim=485
+# VeraCrypt with PIM (Personal Iteration Multiplier) — hashcat takes a RANGE, not a single value.
+# There is no --veracrypt-pim flag; it is --veracrypt-pim-start / --veracrypt-pim-stop.
+hashcat -m 13711 veracrypt_header.bin rockyou.txt --veracrypt-pim-start=485 --veracrypt-pim-stop=485
+# Unknown PIM? sweep a range (slower — each PIM value re-derives the key):
+hashcat -m 13711 veracrypt_header.bin rockyou.txt --veracrypt-pim-start=1 --veracrypt-pim-stop=500
 
 # VeraCrypt with keyfile
 hashcat -m 13711 veracrypt_header.bin rockyou.txt --veracrypt-keyfiles=keyfile.bin
@@ -1298,7 +1319,7 @@ hashcat -m 29541 luks2_header.bin /usr/share/seclists/Passwords/Common-Credentia
 bitlocker2john -i /dev/sdb1 > bitlocker_hash.txt
 # Output may include multiple hash variants ($bitlocker$0$, $bitlocker$1$, $bitlocker$2$, $bitlocker$3$)
 hashcat -m 22100 bitlocker_hash.txt /usr/share/wordlists/rockyou.txt
-hashcat -m 22100 bitlocker_hash.txt /usr/share/seclists/Passwords/darkweb2017-top10000.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 22100 bitlocker_hash.txt /usr/share/seclists/Passwords/Common-Credentials/darkweb2017_top-10000.txt -r /usr/share/john/rules/best64.rule
 ```
 
 ### 5.17 WPA/WPA2 4-Way Handshake (.cap) — Mode 22000 / 2500
@@ -1320,7 +1341,7 @@ aircrack-ng -a 2 -b <BSSID> -w /usr/share/wordlists/rockyou.txt <CAP_FILE>.cap
 hcxpcapngtool -o <CAP_FILE>.22000 <CAP_FILE>.cap
 hashcat -m 22000 -a 0 <CAP_FILE>.22000 /usr/share/wordlists/rockyou.txt
 # With rules
-hashcat -m 22000 -a 0 <CAP_FILE>.22000 /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 22000 -a 0 <CAP_FILE>.22000 /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 
 # Path C — legacy hccapx for older hashcat (mode 2500)
 cap2hccapx <CAP_FILE>.cap <CAP_FILE>.hccapx
@@ -1448,10 +1469,10 @@ done
 This file is for **offline** hash cracking. Online attacks (live brute-force / password spraying against a service) belong in [login-brute-forcing.md](login-brute-forcing.md) — read Phase 0 (Pre-Flight: lockout threshold) before any spray attempt:
 
 - [Phase 0: Pre-Flight Checks (password policy + lockout awareness)](login-brute-forcing.md#phase-0-pre-flight-checks)
-- [Phase 2: Hydra — Full Protocol Reference](login-brute-forcing.md#phase-2-hydra--full-protocol-reference)
-- [Phase 6: NetExec (nxc) — Windows Spray](login-brute-forcing.md#phase-6-netexec-nxc--windows-spray)
+- [Phase 2: Hydra — Full Protocol Reference](login-brute-forcing.md#phase-2-hydra-full-protocol-reference)
+- [Phase 6: NetExec (nxc) — Windows Spray](login-brute-forcing.md#phase-6-netexec-nxc-windows-spray)
 - [Phase 7: Kerberos-Specific Spraying (kerbrute)](login-brute-forcing.md#phase-7-kerberos-specific-spraying)
-- [Phase 10: Detection & Lockout Avoidance](login-brute-forcing.md#phase-10-detection--lockout-avoidance)
+- [Phase 10: Detection & Lockout Avoidance](login-brute-forcing.md#phase-10-detection-lockout-avoidance)
 
 After cracking offline hashes here, take the recovered cleartext credentials there for live spraying — and respect lockout thresholds first (`netexec smb <DC_IP> -u <USER> -p <PASSWORD> --pass-pol`).
 
@@ -1640,15 +1661,15 @@ else:
 | rockyou.txt | `/usr/share/wordlists/rockyou.txt` |
 | SecLists Passwords | `/usr/share/seclists/Passwords/` |
 | SecLists Usernames | `/usr/share/seclists/Usernames/` |
-| darkweb2017-top10000 | `/usr/share/seclists/Passwords/darkweb2017-top10000.txt` |
-| xato-net-10-million | `/usr/share/seclists/Passwords/xato-net-10-million-passwords.txt` |
-| 10M top 1M | `/usr/share/seclists/Passwords/Common-Credentials/10-million-password-list-top-1000000.txt` |
+| darkweb2017-top10000 | `/usr/share/seclists/Passwords/Common-Credentials/darkweb2017_top-10000.txt` |
+| xato-net-10-million | `/usr/share/seclists/Passwords/Common-Credentials/xato-net-10-million-passwords.txt` |
+| 10M top 1M | `/usr/share/seclists/Passwords/Common-Credentials/xato-net-10-million-passwords.txt` |
 | best1050 | `/usr/share/seclists/Passwords/Common-Credentials/best1050.txt` |
 | SNMP community strings | `/usr/share/seclists/Discovery/SNMP/common-snmp-community-strings-onesixtyone.txt` |
 | Default credentials | `/usr/share/seclists/Passwords/Default-Credentials/` |
 | Hashcat rules dir | `/usr/share/hashcat/rules/` |
 | John rules dir | `/etc/john/john.conf` (rules section) |
-| best64.rule | `/usr/share/hashcat/rules/best64.rule` |
+| best64.rule | `/usr/share/john/rules/best64.rule` |
 | OneRuleToRuleThemAll | `/usr/share/hashcat/rules/OneRuleToRuleThemAll.rule` |
 | dive.rule | `/usr/share/hashcat/rules/dive.rule` |
 

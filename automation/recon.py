@@ -5,7 +5,7 @@ recon.py — Automated CPTS-style recon orchestrator.
 Wraps standard Kali tooling (nmap, nxc/netexec, smbclient, rpcclient,
 ldapsearch, dig, whatweb, ffuf, kerbrute, enum4linux-ng, snmpwalk;
 creds-mode adds impacket-GetUserSPNs/findDelegation/secretsdump, certipy-ad,
-bloodhound-python) to produce structured per-target output ready for branch decisions.
+rusthound-ce/bloodhound-ce-python) to produce structured per-target output ready for branch decisions.
 
 Defaults are AGGRESSIVE: full TCP (-p-), UDP top-100, web brute, AD enum,
 SSL audit, vhost fuzz — just point it at an IP and walk away.
@@ -150,6 +150,17 @@ def run(cmd: list[str] | str, outfile: Path | None = None,
         return 127, ""
 
     chunks: list[str] = []
+    # Watchdog kills the process on deadline: a tool that hangs while emitting NO
+    # output (ldapsearch to an unreachable DC, `find /` on a huge FS) would block
+    # readline() forever, so a wall-clock timer is the only reliable timeout.
+    timed_out = {"hit": False}
+    def _on_timeout() -> None:
+        timed_out["hit"] = True
+        proc.kill()
+    killer = threading.Timer(timeout, _on_timeout) if timeout else None
+    if killer:
+        killer.daemon = True
+        killer.start()
     try:
         assert proc.stdout is not None
         while True:
@@ -161,24 +172,25 @@ def run(cmd: list[str] | str, outfile: Path | None = None,
             chunks.append(line)
             if MIRROR:
                 _safe_print(prefix + line)
-            # Cooperative timeout check
-            if timeout and (time.time() - started) > timeout:
-                proc.kill()
-                err(f"timeout after {timeout}s: {pretty}")
-                _append_runlog(
-                    f"[{datetime.now().isoformat(timespec='seconds')}] rc=124 "
-                    f"({time.time()-started:.0f}s) {pretty}\n"
-                )
-                rc = 124
-                out = "".join(chunks)
-                if outfile:
-                    outfile.parent.mkdir(parents=True, exist_ok=True)
-                    outfile.write_text(out)
-                return rc, out
         rc = proc.wait()
     except KeyboardInterrupt:
         proc.kill()
         raise
+    finally:
+        if killer:
+            killer.cancel()
+
+    if timed_out["hit"]:
+        err(f"timeout after {timeout}s: {pretty}")
+        _append_runlog(
+            f"[{datetime.now().isoformat(timespec='seconds')}] rc=124 "
+            f"({time.time()-started:.0f}s) {pretty}\n"
+        )
+        out = "".join(chunks)
+        if outfile:
+            outfile.parent.mkdir(parents=True, exist_ok=True)
+            outfile.write_text(out)
+        return 124, out
 
     out = "".join(chunks)
     wrote = False
@@ -260,7 +272,9 @@ def phase1_5_enrich(t: Target, outdir: Path) -> None:
     # SMB name probe — only if 139/445 actually open
     if any(p in t.open_tcp for p in (139, 445)) and have("nxc"):
         rc, out = run(["nxc", "smb", t.ip], timeout=30, tag="nxc-id")
-        m = re.search(r"name:(\S+).*domain:(\S+)", out)
+        # nxc prints "(name:HOST) (domain:DOMAIN)" — capture inside the parens,
+        # NOT \S+ (which greedily swallows the trailing ')' → 'HOST)' / 'DOMAIN)').
+        m = re.search(r"\(name:([^)]+)\).*\(domain:([^)]+)\)", out)
         if m:
             t.hostname = t.hostname or m.group(1)
             t.domain   = t.domain   or m.group(2)
@@ -1010,7 +1024,8 @@ def write_summary(t: Target, outdir: Path, started: datetime) -> None:
         cmds.append(f"nxc smb {t.ip} -u USER -p PASS --shares --users --pass-pol --groups --rid-brute 10000")
         cmds.append(f"nxc ldap {t.ip} -u USER -p PASS --kerberoasting kerb.hash --asreproast asrep2.hash --find-delegation --admin-count")
         cmds.append(f"impacket-GetUserSPNs '{t.domain}/USER:PASS' -dc-ip {t.ip} -request -outputfile kerberoast.hash")
-        cmds.append(f"bloodhound-python -u USER -p PASS -d {t.domain} -dc {t.fqdn or t.ip} -ns {t.ip} -c All --zip")
+        cmds.append(f"rusthound-ce -d {t.domain} -u USER@{t.domain} -p PASS -f {t.fqdn or t.ip} -i {t.ip} -c All -z")
+        cmds.append(f"#  pass-the-hash instead? rusthound-ce has no --hashes — use: bloodhound-ce-python -u USER --hashes :NTHASH -d {t.domain} -dc {t.fqdn or t.ip} -ns {t.ip} -c All --zip")
         cmds.append("")
         if has_kerb:
             cmds.append("# Time skew \u2014 sync to DC before any Kerberos action")
@@ -1342,8 +1357,10 @@ def host_mode(args) -> int:
         # ── 8b. BloodHound auto-collect (always-on for domain-joined) ─────
         bh_dir = out / "bloodhound"
         bh_dir.mkdir(parents=True, exist_ok=True)
+        # Collector preference: rusthound-ce (fastest, CE schema, single static
+        # binary) → bloodhound-ce-python (CE) → bloodhound-python (legacy schema).
         bh_cmd = ""
-        for c in ("bloodhound-ce-python", "bloodhound-python"):
+        for c in ("rusthound-ce", "bloodhound-ce-python", "bloodhound-python"):
             try:
                 if subprocess.run(["which", c], capture_output=True).returncode == 0:
                     bh_cmd = c; break
@@ -1356,27 +1373,38 @@ def host_mode(args) -> int:
         elif os.environ.get("BLOODHOUND_USER") and os.environ.get("BLOODHOUND_PASS"):
             bh_auth = "creds"
 
+        def _collector(tool: str, auth: str) -> str:
+            """Shell command for the chosen collector + auth context.
+            rusthound-ce uses -f/-i/-o/-z; bloodhound-*-python use -dc/-ns/--zip."""
+            if tool == "rusthound-ce":
+                base = f"rusthound-ce -d '{domain}' -f '{dc_host}' -i {dc_ip} -c All -z -o '{bh_dir}'"
+                if auth == "kerberos":
+                    return f"KRB5CCNAME=${{KRB5CCNAME:-/tmp/krb5cc_$(id -u)}} {base} -k"
+                u = os.environ.get("BLOODHOUND_USER", "<USER>")
+                if "@" not in u: u = f"{u}@{domain}"
+                pw = os.environ.get("BLOODHOUND_PASS", "<PASS>")
+                return f"{base} -u '{u}' -p '{pw}'"
+            # bloodhound-ce-python / bloodhound-python share the same CLI
+            base = f"cd '{bh_dir}' && {tool} -d '{domain}' -dc '{dc_host}' -ns {dc_ip} -c All --zip"
+            if auth == "kerberos":
+                return f"KRB5CCNAME=${{KRB5CCNAME:-/tmp/krb5cc_$(id -u)}} {base} -k --no-pass"
+            u = os.environ.get("BLOODHOUND_USER", "<USER>")
+            pw = os.environ.get("BLOODHOUND_PASS", "<PASS>")
+            return f"{base} -u '{u}' -p '{pw}'"
+
         log_lines = [f"DOMAIN={domain}  DC={dc_host}  AUTH={bh_auth}  TOOL={bh_cmd or 'NONE'}\n"]
         if not bh_cmd:
             log_lines.append("[!] No bloodhound collector installed.\n"
-                             "    Install:  pipx install bloodhound-ce  (CE schema, recommended)\n"
-                             f"    Manual:   {bh_cmd or 'bloodhound-ce-python'} -d {domain} -dc {dc_host} -c All --zip -ns {dc_ip}\n")
-        elif bh_auth == "kerberos":
-            log_lines.append("[+] Cached Kerberos ticket — running collector...\n")
-            r = cap(f"cd '{bh_dir}' && KRB5CCNAME=${{KRB5CCNAME:-/tmp/krb5cc_$(id -u)}} "
-                    f"{bh_cmd} -d '{domain}' -dc '{dc_host}' -c All --zip -ns {dc_ip} -k --no-pass 2>&1 | head -60",
-                    timeout=600)
-            log_lines.append(r)
-        elif bh_auth == "creds":
-            log_lines.append("[+] BLOODHOUND_USER / BLOODHOUND_PASS env vars present — running collector...\n")
-            r = cap(f"cd '{bh_dir}' && {bh_cmd} -d '{domain}' -dc '{dc_host}' "
-                    f"-u '{os.environ['BLOODHOUND_USER']}' -p '{os.environ['BLOODHOUND_PASS']}' "
-                    f"-c All --zip -ns {dc_ip} 2>&1 | head -60",
-                    timeout=600)
+                             "    Install:  cargo install rusthound-ce  OR  pipx install bloodhound-ce\n"
+                             f"    Manual:   rusthound-ce -d {domain} -f {dc_host} -i {dc_ip} -c All -z\n")
+        elif bh_auth in ("kerberos", "creds"):
+            label = "Cached Kerberos ticket" if bh_auth == "kerberos" else "BLOODHOUND_USER/PASS env vars"
+            log_lines.append(f"[+] {label} — running {bh_cmd}...\n")
+            r = cap(f"{_collector(bh_cmd, bh_auth)} 2>&1 | head -60", timeout=600)
             log_lines.append(r)
         else:
             log_lines.append("[i] No Kerberos ticket cached and no BLOODHOUND_USER/BLOODHOUND_PASS set.\n"
-                             f"    Manual:  {bh_cmd} -d {domain} -dc {dc_host} -u <USER> -p <PASS> -c All --zip -ns {dc_ip}\n")
+                             f"    Manual:  {_collector(bh_cmd, 'creds')}\n")
         (bh_dir / "run.log").write_text("\n".join(log_lines))
 
         zips = list(bh_dir.glob("*.zip"))
@@ -1553,17 +1581,41 @@ def creds_mode(args) -> int:
         if re.search(r"ESC\d", o): hit("ADCS vulnerable template (ESC*) — see 05_adcs.txt → §6.2")
 
     # ── 6. BloodHound collection ────────────────────────────────────────────
-    if have("bloodhound-python") and dom:
-        bh = ["bloodhound-python", "-d", dom, "-dc", fqdn, "-ns", ip, "-c", "All", "--zip"]
-        if args.kerberos: bh += ["-u", args.user, "-k", "-no-pass", "--use-kcache"]
-        elif args.hash:   bh += ["-u", args.user, "--hashes", f":{args.hash}"]
-        else:             bh += ["-u", args.user, "-p", args.password]
+    # Preference: rusthound-ce (fast, CE schema) for password/Kerberos auth.
+    # rusthound-ce has NO --hashes flag, so pass-the-hash must use
+    # bloodhound-ce-python; fall back further to legacy bloodhound-python.
+    bh_tool = None
+    if not args.hash and have("rusthound-ce"):
+        bh_tool = "rusthound-ce"
+    elif have("bloodhound-ce-python"):
+        bh_tool = "bloodhound-ce-python"
+    elif have("bloodhound-python"):
+        bh_tool = "bloodhound-python"
+
+    if bh_tool and dom:
         bhdir = out / "bloodhound"; bhdir.mkdir(exist_ok=True)
-        cwd = os.getcwd(); os.chdir(bhdir)
-        try:
+        if bh_tool == "rusthound-ce":
+            # rusthound-ce writes the zip straight to -o; no cwd juggling needed.
+            bh = ["rusthound-ce", "-d", dom, "-i", ip, "-c", "All", "-z", "-o", str(bhdir)]
+            if fqdn and fqdn != ip:
+                bh += ["-f", fqdn]
+            if args.kerberos:
+                bh += ["-k"]          # reads $KRB5CCNAME
+            else:
+                u = args.user if "@" in args.user else f"{args.user}@{dom}"
+                bh += ["-u", u, "-p", args.password]
             run(bh, outfile=out / "06_bloodhound.txt", timeout=600, tag="bloodhound")
-        finally:
-            os.chdir(cwd)
+        else:
+            bh = [bh_tool, "-d", dom, "-dc", fqdn, "-ns", ip, "-c", "All", "--zip"]
+            if args.kerberos: bh += ["-u", args.user, "-k", "-no-pass", "--use-kcache"]
+            elif args.hash:   bh += ["-u", args.user, "--hashes", f":{args.hash}"]
+            else:             bh += ["-u", args.user, "-p", args.password]
+            # bloodhound-*-python write the zip to CWD — chdir into the loot dir.
+            cwd = os.getcwd(); os.chdir(bhdir)
+            try:
+                run(bh, outfile=out / "06_bloodhound.txt", timeout=600, tag="bloodhound")
+            finally:
+                os.chdir(cwd)
 
     # ── findings from harvested hashes ──────────────────────────────────────
     for hf, mode, what in (("03_kerberoast.hash", "13100", "Kerberoastable accounts"),

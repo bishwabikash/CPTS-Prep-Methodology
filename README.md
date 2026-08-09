@@ -83,6 +83,10 @@ If you just landed on a fresh target or subnet, follow this exact order:
 
 > **Automation shortcut:** Run `python3 automation/recon.py <TARGET_IP>` to automate Phases 0–3 (host discovery, port scanning, service enumeration). Output is structured under `./recon_<IP>_<timestamp>/` (look for `summary.md` first). Full recon-script reference: [automation/README.md](automation/README.md).
 
+> **Per-machine progression:** the step-by-step sequence to run against *any single host* — scan → fingerprint → enumerate → foothold → stabilize → privesc → loot → cred-reuse → pivot → proof — lives in [pentest-process.md § Per-Host Inner Loop](pentest-process.md#per-host-inner-loop). Use this file for *which host to attack*; use that loop for *how to work a host*.
+
+> **Started with credentials instead of a black-box perimeter?** Skip the foothold ladder below and run the assumed-breach opening in [exam-mechanics.md § Phase 2](exam-mechanics.md#phase-2-the-assumed-breach-opening-first-30-minutes) first.
+
 ---
 
 ## 📁 File Index
@@ -90,7 +94,8 @@ If you just landed on a fresh target or subnet, follow this exact order:
 | File | Purpose | When to Use |
 |---|---|---|
 | [enumeration-methodology.md](enumeration-methodology.md) | **Master enumeration reference** — host discovery, port scanning, service-specific enumeration per protocol | **Always start here** — first file you open on every engagement |
-| [pentest-process.md](pentest-process.md) | End-to-end engagement workflow — scoping, rules of engagement, phase gates, deliverables | Read before kick-off; revisit at every phase boundary |
+| [exam-mechanics.md](exam-mechanics.md) | **Exam as a system** — pass criteria to confirm, VPN/panel/clock, assumed-breach opening, broken-box recovery, proving business impact | Day 0 before the clock starts; again when handed creds; again the moment you get DA |
+| [pentest-process.md](pentest-process.md) | End-to-end engagement workflow — scoping, rules of engagement, phase gates, deliverables. Contains the **Per-Host Inner Loop** — the canonical "how do I approach any machine" progression | Read before kick-off; revisit at every phase boundary |
 | [vulnerability-assessment.md](vulnerability-assessment.md) | Vulnerability scanning, triage, false-positive validation, CVSS prioritisation | After enumeration, before active exploitation — prioritise targets |
 | [linux-methodology.md](linux-methodology.md) | Linux foothold, local enum, privilege escalation, credential harvesting | After confirming the target is Linux |
 | [windows-methodology.md](windows-methodology.md) | Windows foothold, local privesc (token abuse, services, AMSI bypass), lateral movement | After confirming the target is Windows |
@@ -215,7 +220,7 @@ Pick the path matching the most-promising attack surface from your scan. Run the
 | SNMP (161/UDP) | `snmpwalk -v2c -c public <IP>` (try `private`, `community`) | Often leaks usernames + processes for free | enumeration-methodology.md Phase 1.3.1 |
 | MSSQL (1433) | `nxc mssql <IP> -u sa -p '' --no-bruteforce` (try blank/sa) | brute-force; xp_cmdshell if auth | windows-methodology.md Phase 2.4 |
 | Known unpatched OS | EternalBlue (445), BlueKeep (3389), SMBGhost (445), ZeroLogon (DC) | Confirm patch state with nmap NSE first | windows-methodology.md Phase 2.6 |
-| LAN access, no creds | `sudo responder -I tun0 -rdw` (LLMNR/NBT-NS poison) — wait 5–15 min | mitm6 IPv6 DNS takeover; ADIDNS wildcard if you have a low-priv account | active-directory-methodology.md Phase 1.6 / 1.7 / 1.8 → password-cracking.md (offline cracking) |
+| LAN access, no creds | `sudo responder -I tun0 -wv` (LLMNR/NBT-NS poison) — wait 5–15 min | mitm6 IPv6 DNS takeover; ADIDNS wildcard if you have a low-priv account | active-directory-methodology.md Phase 1.6 / 1.7 / 1.8 → password-cracking.md (offline cracking) |
 | Phishing-equivalent (CPTS sometimes simulates) | Look for SMB share writable → drop SCF/LNK/HTA → wait for service-account auth → Responder | RBCD/relay if a machine account auths | active-directory-methodology.md Phase 11 (Coercion) |
 | Nothing obvious | Re-enum FULL `-p-` + UDP top-200; check vhosts; check non-standard ports | Re-read your nmap — banner versions tell you what to searchsploit | enumeration-methodology.md Phase 1.1, Phase 1.3 |
 | Scope includes a client app (APK/IPA/EXE/JAR/Electron) | static decompile → shadow-API discovery → backend recon | n/a (recon-first) | [mobile-and-thickclient-methodology.md](mobile-and-thickclient-methodology.md) |
@@ -360,7 +365,7 @@ Quick index for the most-asked CPTS web injection paths. Phase numbers refer to 
 - [ ] Re-run [enumeration](enumeration-methodology.md) on ALL hosts (not just the one you're focused on)
 - [ ] Check [UDP ports](enumeration-methodology.md#13-udp-scanning): `sudo nmap -sU --top-ports 50 <IP>`
 - [ ] Try harder [password spraying](active-directory-methodology.md#15-password-spraying) (Season+Year!, Company+123)
-- [ ] Re-read gobuster/feroxbuster output — missed a [directory](web-methodology.md#12-directory--file-enumeration)?
+- [ ] Re-read gobuster/feroxbuster output — missed a [directory](web-methodology.md#12-directory-file-enumeration)?
 - [ ] Check for [vhosts](enumeration-methodology.md#351-vhost-fuzzing-distinct-from-subdomain-enumeration): `ffuf -H "Host: FUZZ.<DOMAIN>"`
 - [ ] Look at [SNMP (UDP 161)](enumeration-methodology.md#311-snmp-udp-161) — often leaks usernames and processes
 - [ ] Check [NFS exports](enumeration-methodology.md#312-nfs-tcpudp-2049): `showmount -e <IP>`
@@ -369,7 +374,7 @@ Quick index for the most-asked CPTS web injection paths. Phase numbers refer to 
 - [ ] Check for internal services (127.0.0.1) on compromised hosts → [pivot](tunneling-pivoting.md)
 - [ ] Run [BloodHound](bloodhound-guide.md) again with new creds — new edges may appear
 - [ ] Check [ADCS](active-directory-methodology.md#phase-6-ad-cs-active-directory-certificate-services-attacks): `certipy-ad find -vulnerable`
-- [ ] Look at [file shares](enumeration-methodology.md#38-smb-tcp-139--445) again with new creds — new access?
+- [ ] Look at [file shares](enumeration-methodology.md#38-smb-tcp-139-445) again with new creds — new access?
 
 ### "I'm pivoting from a foothold — now what?"
 

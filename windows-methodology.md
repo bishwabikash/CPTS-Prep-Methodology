@@ -93,11 +93,11 @@ copy C:\temp\shell.exe \\<IP>\<SHARE>\
 
 ### 1.4 RPC / WMI Enumeration (TCP 135/593)
 
-> See [RPC / MSRPC (TCP 111 / 135)](enumeration-methodology.md#39-rpc--msrpc-tcp-111--135) and [WMI (TCP 135)](enumeration-methodology.md#326-wmi-tcp-135).
+> See [RPC / MSRPC (TCP 111 / 135)](enumeration-methodology.md#39-rpc-msrpc-tcp-111-135) and [WMI (TCP 135)](enumeration-methodology.md#326-wmi-tcp-135).
 
 ### 1.5 LDAP Enumeration (TCP 389/636/3268)
 
-> See [LDAP (TCP 389 / 636 / 3268 / 3269)](enumeration-methodology.md#310-ldap-tcp-389--636--3268--3269).
+> See [LDAP (TCP 389 / 636 / 3268 / 3269)](enumeration-methodology.md#310-ldap-tcp-389-636-3268-3269).
 
 ### 1.6 SNMP Enumeration (UDP 161)
 
@@ -105,7 +105,7 @@ copy C:\temp\shell.exe \\<IP>\<SHARE>\
 
 ### 1.7 WinRM (TCP 5985/5986)
 
-> See [WinRM (TCP 5985 / 5986)](enumeration-methodology.md#316-winrm-tcp-5985--5986).
+> See [WinRM (TCP 5985 / 5986)](enumeration-methodology.md#316-winrm-tcp-5985-5986).
 
 ### 1.8 MSSQL (TCP 1433)
 
@@ -140,7 +140,7 @@ java -jar iis_shortname_scanner.jar http://<IP>/
 
 ### 1.12 SMTP (TCP 25)
 
-> See [SMTP (TCP 25 / 465 / 587)](enumeration-methodology.md#33-smtp-tcp-25--465--587).
+> See [SMTP (TCP 25 / 465 / 587)](enumeration-methodology.md#33-smtp-tcp-25-465-587).
 
 ### 1.13 RDP Enumeration (TCP 3389)
 ```bash
@@ -3705,7 +3705,7 @@ sudo responder -I <INTERFACE>
 
 ```bash
 # === Crack the captured NTLMv2 hash ===
-hashcat -m 5600 captured_hash.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m 5600 captured_hash.txt /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 ```
 
 #### Living-off-the-land / LOTL variant

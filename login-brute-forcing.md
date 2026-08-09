@@ -115,7 +115,7 @@ crunch 8 12 abcdef0123456789 -o hex.txt   # length 8-12 hex
 hashcat --stdout -a 3 'Welcome@?d?d' > w.txt
 
 # Mutate existing wordlist with rules
-hashcat --stdout rockyou.txt -r /usr/share/hashcat/rules/best64.rule > mutated.txt
+hashcat --stdout rockyou.txt -r /usr/share/john/rules/best64.rule > mutated.txt
 
 # Common spray seeds (season + year + symbol)
 cat <<EOF > spray.txt

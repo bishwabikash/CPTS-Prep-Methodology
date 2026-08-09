@@ -75,7 +75,7 @@ nxc ldap <DC_IP> -u '<USER>' -p '<PASSWORD>' -M BadSuccessor
 #   wam (Entra/M365 tokens), entra-id, mssql_coerce, efsr_spray
 ```
 
-[Back to top](#enumeration--information-gathering-methodology)
+[Back to top](#enumeration-information-gathering-methodology)
 
 ---
 
@@ -373,7 +373,7 @@ sudo iptables -L -n -v | grep -i recent
 sudo nft list ruleset 2>/dev/null | grep -iE 'recent|knock'
 ```
 
-[Back to top](#enumeration--information-gathering-methodology)
+[Back to top](#enumeration-information-gathering-methodology)
 
 ---
 
@@ -458,7 +458,7 @@ cewl http://<TARGET> -d 3 -m 5 -e --email_file emails.txt -w cewl_wordlist.txt
 # Generate password mutations from wordlist
 # Hashcat rules (append to cracking command)
 # For full cracking methodology (modes, rules, strategies), see password-cracking.md
-hashcat -m <MODE> hashes.txt wordlist.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m <MODE> hashes.txt wordlist.txt -r /usr/share/john/rules/best64.rule
 hashcat -m <MODE> hashes.txt wordlist.txt -r /usr/share/hashcat/rules/OneRuleToRuleThemAll.rule
 
 # John rules
@@ -480,7 +480,7 @@ john --wordlist=wordlist.txt --rules=best64 hashes.txt
 - intelligence tools (SpiderFoot, Recon-ng modules)
 ```
 
-[Back to top](#enumeration--information-gathering-methodology)
+[Back to top](#enumeration-information-gathering-methodology)
 
 ---
 
@@ -1445,7 +1445,7 @@ hydra -L users.txt -P passwords.txt postgres://<IP>
 
 #### PostgreSQL Large Object (LO) read/write primitive — superuser
 
-> Full PostgreSQL attack chain (post-foothold exploitation): [attacking-common-applications.md § Phase 14s: PostgreSQL — Post-Auth File R/W & RCE Primitives](attacking-common-applications.md#phase-14s-postgresql--post-auth-file-rw--rce-primitives).
+> Full PostgreSQL attack chain (post-foothold exploitation): [attacking-common-applications.md § Phase 14s: PostgreSQL — Post-Auth File R/W & RCE Primitives](attacking-common-applications.md#phase-14s-postgresql-post-auth-file-rw-rce-primitives).
 
 ### 3.23 Oracle TNS (TCP 1521)
 
@@ -1573,7 +1573,7 @@ odat passwords -s <IP> -d <SID> -U <USER> -P <PASSWORD> --get-passwords
 
 #### Post-Exploit
 
-> Full Oracle TNS attack chain (post-foothold exploitation): [attacking-common-applications.md § Phase 14t: Oracle Database (TNS Listener)](attacking-common-applications.md#phase-14t-oracle-database-tns-listener--tcp-1521).
+> Full Oracle TNS attack chain (post-foothold exploitation): [attacking-common-applications.md § Phase 14t: Oracle Database (TNS Listener)](attacking-common-applications.md#phase-14t-oracle-database-tns-listener-tcp-1521).
 
 ### 3.24 Memcached (TCP 11211)
 ```bash
@@ -1750,7 +1750,7 @@ hydra -l root -P /usr/share/wordlists/rockyou.txt -s 10000 <IP> \
   https-post-form "/session_login.cgi:user=^USER^&pass=^PASS^:F=Login failed"
 ```
 
-> Full Webmin attack chain (post-foothold exploitation): [attacking-common-applications.md § Phase 14u: Webmin / MiniServ](attacking-common-applications.md#phase-14u-webmin--miniserv-tcp-10000).
+> Full Webmin attack chain (post-foothold exploitation): [attacking-common-applications.md § Phase 14u: Webmin / MiniServ](attacking-common-applications.md#phase-14u-webmin-miniserv-tcp-10000).
 
 ### 3.29 IRC (TCP 6667 / 6697)
 ```bash
@@ -1891,7 +1891,7 @@ python3 ikeforce.py <TARGET> -s 1 -w /usr/share/wordlists/rockyou.txt -i <GROUP_
 # See tunneling-pivoting.md for routing the internal subnet through the new tun
 ```
 
-[Back to top](#enumeration--information-gathering-methodology)
+[Back to top](#enumeration-information-gathering-methodology)
 
 ---
 
@@ -2129,7 +2129,7 @@ findstr /i "password secret community psk key" config.boot
 
 > **Tip:** VyOS config.boot often contains VPN PSKs that grant access to internal networks not visible from the DMZ. Cross-reference `next-hop` routes and interface addresses to identify new subnets for pivoting. RADIUS secrets unlock authentication to other network devices sharing the same RADIUS server.
 
-[Back to top](#enumeration--information-gathering-methodology)
+[Back to top](#enumeration-information-gathering-methodology)
 
 ---
 
@@ -2240,7 +2240,7 @@ hashcat --example-hashes | grep -i 'kerberos'
 hashcat -m <MODE> hashes.txt /usr/share/wordlists/rockyou.txt
 
 # Wordlist + rules (highly recommended — catches mutations)
-hashcat -m <MODE> hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule
+hashcat -m <MODE> hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/john/rules/best64.rule
 hashcat -m <MODE> hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/OneRuleToRuleThemAll.rule
 
 # Mask attack (pattern-based brute-force — e.g. 8 chars: upper+lower+digit)
@@ -2311,5 +2311,5 @@ Every native / built-in technique used in this methodology, indexed by use case.
 
 > See per-phase sections above for full context, OPSEC notes, and AV/EDR caveats. Cross-reference [windows-methodology.md](windows-methodology.md), [active-directory-methodology.md](active-directory-methodology.md), and [file-transfers.md](file-transfers.md) for chained workflows.
 
-[Back to top](#enumeration--information-gathering-methodology)
+[Back to top](#enumeration-information-gathering-methodology)
 

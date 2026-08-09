@@ -176,7 +176,7 @@ nc <TARGET_IP> 8456                            # raw TCP
 
 > **`/dev/tcp` distro support:** Debian/Ubuntu/RHEL/Kali bash all support it. **Alpine `ash` / busybox `/bin/sh` does NOT** — bash must be installed first, or use the `nc + mkfifo` form (busybox `nc` works) or fall back to a Python one-liner.
 
-> **Windows OpenSSH client:** see [Native ssh.exe (Built-in since Windows 10 1809 / Server 2019)](#native-sshexe-built-in-since-windows-10-1809--server-2019) below for the canonical Windows-side `ssh -L`/`-R`/`-D` reference.
+> **Windows OpenSSH client:** see [Native ssh.exe (Built-in since Windows 10 1809 / Server 2019)](#native-sshexe-built-in-since-windows-10-1809-server-2019) below for the canonical Windows-side `ssh -L`/`-R`/`-D` reference.
 
 ---
 
@@ -797,7 +797,7 @@ meterpreter> portfwd add -l 8080 -p 8080 -r 127.0.0.1
 # ATTACKER: curl http://127.0.0.1:8080 → reaches target's localhost:8080
 ```
 
-[Back to top](#table-of-contents)
+[Back to top](#tunneling-pivoting-cheatsheet)
 
 ---
 
@@ -1048,7 +1048,7 @@ Agents → Generate → BeaconSMB / BeaconTCP → host: <PARENT_IP>  port: 9000
 | Minimal footprint | ❌ Implant on disk | ✅ SSH (already there) |
 | CPTS exam (speed priority) | ✅ Sliver for complex nets | ✅ Ligolo-ng for simple |
 
-[Back to top](#table-of-contents)
+[Back to top](#tunneling-pivoting-cheatsheet)
 
 ---
 
@@ -1216,7 +1216,7 @@ A misconfigured Squid / Apache mod_proxy / nginx-as-forward-proxy is a pivot you
 ```bash
 # NSE — open-proxy + Squid-specific scripts
 nmap -p <PROXY_PORT> -sV --script http-open-proxy,http-proxy-brute <PROXY_HOST>
-nmap -p <PROXY_PORT> --script http-headers,http-squid-cachemgr <PROXY_HOST>
+nmap -p <PROXY_PORT> --script http-headers,http-open-proxy <PROXY_HOST>
 
 # Manual — does it relay? GET-style proxying
 curl -x http://<PROXY_HOST>:<PROXY_PORT> http://127.0.0.1/ -I
@@ -1645,7 +1645,7 @@ sudo sed -i '/PSK "<PASSWORD>"/d' /etc/ipsec.secrets
 
 > **LOTL caveat:** `nmap -sS` (default SYN scan) and other raw-socket tools skip the kernel's IPsec policy lookup — they emit unencrypted packets and report `filtered`. Always use `-sT` (TCP connect via libc) or proxychains-style userspace clients through the tunnel.
 
-[Back to top](#table-of-contents)
+[Back to top](#tunneling-pivoting-cheatsheet)
 
 ---
 
@@ -1671,4 +1671,4 @@ sudo sed -i '/PSK "<PASSWORD>"/d' /etc/ipsec.secrets
 | **UDP services needed (SNMP, DNS, NTP)** | Ligolo-ng or socat UDP relay | SOCKS/proxychains silently drops UDP; must use route-based or per-port relay |
 | **TCP filtered by IPSec policy (IKE on 500)** | strongSwan transport-mode SA | Establish SA with discovered PSK → ports become reachable |
 
-[Back to top](#table-of-contents)
+[Back to top](#tunneling-pivoting-cheatsheet)

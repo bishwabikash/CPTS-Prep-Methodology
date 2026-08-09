@@ -38,7 +38,7 @@ unknown                                                          → `file <APP>
 
 > **Scoping check:** mobile + thick-client engagements often have a separate RoE that prohibits jailbreaking customer devices, decompiling protected binaries (DMCA-adjacent), or disclosing third-party-library bugs. Confirm scope before pulling on those threads.
 
-[↑ Back to top](#mobile--thick-client-penetration-testing-methodology)
+[↑ Back to top](#mobile-thick-client-penetration-testing-methodology)
 
 ---
 
@@ -112,7 +112,7 @@ which npx                                      # for one-shot @electron/asar inv
 node --version                                 # any LTS
 ```
 
-[↑ Back to top](#mobile--thick-client-penetration-testing-methodology)
+[↑ Back to top](#mobile-thick-client-penetration-testing-methodology)
 
 ---
 
@@ -244,7 +244,7 @@ grep -E '<data ' <APP_PATH>_unpacked/AndroidManifest.xml -B2 -A2
 adb shell am start -W -a android.intent.action.VIEW -d "myapp://login?redirect=https://evil"
 ```
 
-[↑ Back to top](#mobile--thick-client-penetration-testing-methodology)
+[↑ Back to top](#mobile-thick-client-penetration-testing-methodology)
 
 ---
 
@@ -327,7 +327,7 @@ plutil -convert xml1 -o - <APP_PATH>_unpacked/Payload/<APP>.app/Info.plist | gre
 frida-trace -U -m '+[* application:openURL:options:]' <APP_BUNDLE_ID>
 ```
 
-[↑ Back to top](#mobile--thick-client-penetration-testing-methodology)
+[↑ Back to top](#mobile-thick-client-penetration-testing-methodology)
 
 ---
 
@@ -539,7 +539,7 @@ If Detect-It-Easy reports "C++/MSVC" with no .NET CLR header:
   → Procmon trace to identify config files, named pipes, loopback HTTP it talks to
 ```
 
-[↑ Back to top](#mobile--thick-client-penetration-testing-methodology)
+[↑ Back to top](#mobile-thick-client-penetration-testing-methodology)
 
 ---
 
@@ -678,7 +678,7 @@ strings <APP_PATH>_unpacked/native/libfoo.so | grep -iE 'http|key|secret|JNI_OnL
 $GHIDRA_HOME/support/analyzeHeadless /tmp/ghidra_proj proj_name -import <APP_PATH>_unpacked/native/libfoo.so
 ```
 
-[↑ Back to top](#mobile--thick-client-penetration-testing-methodology)
+[↑ Back to top](#mobile-thick-client-penetration-testing-methodology)
 
 ---
 
@@ -753,7 +753,7 @@ hermes-dec --help                              # community tooling
 strings -a index.android.bundle | grep -iE 'https?://|api[_-]?key' | sort -u
 ```
 
-[↑ Back to top](#mobile--thick-client-penetration-testing-methodology)
+[↑ Back to top](#mobile-thick-client-penetration-testing-methodology)
 
 ---
 
@@ -899,4 +899,4 @@ Deliverable for the API testing phase:
    - Race conditions on state-changing endpoints (web-methodology.md Phase 3.9)
 ```
 
-[↑ Back to top](#mobile--thick-client-penetration-testing-methodology)
+[↑ Back to top](#mobile-thick-client-penetration-testing-methodology)

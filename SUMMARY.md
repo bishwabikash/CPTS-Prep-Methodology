@@ -4,6 +4,7 @@
 
 ## Engagement Process
 
+* [Exam Mechanics](exam-mechanics.md)
 * [Pentest Process](pentest-process.md)
 
 ## Enumeration
